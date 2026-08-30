@@ -1,0 +1,167 @@
+//kage:unit pixels
+
+package main
+
+var Resolution vec2
+var SmoothK float
+var MainColor vec3
+
+{{if gt .MainCircles 0}}
+var MainCircles [{{.MainCircles}}]vec4
+{{end}}
+
+{{if gt .MainBridges 0}}
+var MainBridgeEnds [{{.MainBridges}}]vec4
+var MainBridgeRadii [{{.MainBridges}}]vec3
+{{end}}
+
+{{if gt .OtherCircles 0}}
+var OtherCircles [{{.OtherCircles}}]vec4
+{{end}}
+
+{{if gt .OtherBridges 0}}
+var OtherBridgeEnds [{{.OtherBridges}}]vec4
+var OtherBridgeRadii [{{.OtherBridges}}]vec3
+{{end}}
+
+func smin(a, b, k float) float {
+	h := clamp(0.5+0.5*(b-a)/k, 0.0, 1.0)
+	return mix(b, a, h) - k*h*(1.0-h)
+}
+
+func sdCircleDistance(p vec2, circle vec4) float {
+	return length(p-circle.xy) - circle.z
+}
+
+func sdSplineCapsuleDistance(
+	p vec2,
+	a vec2,
+	b vec2,
+	r1 float,
+	r2 float,
+	r3 float,
+) float {
+	ba := b - a
+	pa := p - a
+
+	ba2 := max(dot(ba, ba), 1e-12)
+	t := clamp(dot(pa, ba)/ba2, 0.0, 1.0)
+
+	q := pa - ba*t
+
+	// First/second half of spline.
+	side := step(0.5, t)
+	x := 2.0*t - side
+
+	ra := mix(r1, r2, side)
+	rb := mix(r2, r3, side)
+
+	// smoothstep interpolation.
+	s := x*x*(3.0-2.0*x)
+	radius := mix(ra, rb, s)
+
+	return length(q) - radius
+}
+
+func Fragment(dstPos vec4) vec4 {
+	uv := dstPos.xy / Resolution
+
+	k := SmoothK
+	big := 100.0
+
+	// ------------------------------------------------------------
+	// Main visible field
+	// ------------------------------------------------------------
+
+	mainDist := big
+
+	{{range $i := seq .MainCircles}}
+	mainCircle{{$i}} := MainCircles[{{$i}}]
+
+	mainCircleDist{{$i}} := sdCircleDistance(
+		uv,
+		mainCircle{{$i}},
+	)
+
+	mainDist = smin(
+		mainDist,
+		mainCircleDist{{$i}},
+		k,
+	)
+	{{end}}
+
+	{{range $i := seq .MainBridges}}
+	mainBridgeEnd{{$i}} := MainBridgeEnds[{{$i}}]
+	mainBridgeRadius{{$i}} := MainBridgeRadii[{{$i}}]
+
+	mainBridgeDist{{$i}} := sdSplineCapsuleDistance(
+		uv,
+		mainBridgeEnd{{$i}}.xy,
+		mainBridgeEnd{{$i}}.zw,
+		mainBridgeRadius{{$i}}.x,
+		mainBridgeRadius{{$i}}.y,
+		mainBridgeRadius{{$i}}.z,
+	)
+
+	mainDist = smin(
+		mainDist,
+		mainBridgeDist{{$i}},
+		k,
+	)
+	{{end}}
+
+	// ------------------------------------------------------------
+	// Combined invisible "everything else" field
+	// ------------------------------------------------------------
+
+	otherDist := big
+
+	{{range $i := seq .OtherCircles}}
+	otherCircle{{$i}} := OtherCircles[{{$i}}]
+
+	otherCircleDist{{$i}} := sdCircleDistance(
+		uv,
+		otherCircle{{$i}},
+	)
+
+	otherDist = smin(
+		otherDist,
+		otherCircleDist{{$i}},
+		k,
+	)
+	{{end}}
+
+	{{range $i := seq .OtherBridges}}
+	otherBridgeEnd{{$i}} := OtherBridgeEnds[{{$i}}]
+	otherBridgeRadius{{$i}} := OtherBridgeRadii[{{$i}}]
+
+	otherBridgeDist{{$i}} := sdSplineCapsuleDistance(
+		uv,
+		otherBridgeEnd{{$i}}.xy,
+		otherBridgeEnd{{$i}}.zw,
+		otherBridgeRadius{{$i}}.x,
+		otherBridgeRadius{{$i}}.y,
+		otherBridgeRadius{{$i}}.z,
+	)
+
+	otherDist = smin(
+		otherDist,
+		otherBridgeDist{{$i}},
+		k,
+	)
+	{{end}}
+
+	// ------------------------------------------------------------
+	// Squeezing
+	// ------------------------------------------------------------
+
+	squeezedDist :=
+		mainDist -
+		smin(otherDist, 0.0, k*0.5)
+
+	if squeezedDist >= 0.0 {
+		discard()
+	}
+
+	return vec4(MainColor, 1.0)
+}
