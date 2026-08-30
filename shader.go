@@ -4,6 +4,8 @@ import (
 	"bytes"
 	_ "embed"
 	"fmt"
+	"strconv"
+	"strings"
 	"text/template"
 
 	"github.com/hajimehoshi/ebiten/v2"
@@ -12,14 +14,27 @@ import (
 //go:embed shader.kage.tmpl
 var kageSource string
 
-var kageTemplate = template.Must(template.New("shader").Parse(kageSource))
+var kageTemplate = template.Must(template.New("shader").Funcs(template.FuncMap{
+	"float": formatKageFloat,
+}).Parse(kageSource))
 
-// ShaderLimits sets the fixed-size array capacities baked into the compiled Kage shader.
-type ShaderLimits struct {
+// formatKageFloat renders f as a Kage float literal, which requires a decimal point.
+func formatKageFloat(f float32) string {
+	s := strconv.FormatFloat(float64(f), 'f', -1, 32)
+	if !strings.Contains(s, ".") {
+		s += ".0"
+	}
+	return s
+}
+
+// ShaderConfig sets the compile-time constants baked into the generated Kage shader:
+// fixed-size array capacities plus the smooth-min blending radius.
+type ShaderConfig struct {
 	MainCircles  int
 	MainBridges  int
 	OtherCircles int
 	OtherBridges int
+	SmoothK      float32
 }
 
 type Circle struct {
@@ -39,17 +54,17 @@ type Group struct {
 
 type MetaballShader struct {
 	shader *ebiten.Shader
-	limits ShaderLimits
+	config ShaderConfig
 }
 
-func NewMetaballShader(limits ShaderLimits) (*MetaballShader, error) {
-	if limits.MainCircles <= 0 || limits.MainBridges <= 0 ||
-		limits.OtherCircles <= 0 || limits.OtherBridges <= 0 {
-		return nil, fmt.Errorf("shader limits must all be positive: %+v", limits)
+func NewMetaballShader(config ShaderConfig) (*MetaballShader, error) {
+	if config.MainCircles <= 0 || config.MainBridges <= 0 ||
+		config.OtherCircles <= 0 || config.OtherBridges <= 0 || config.SmoothK <= 0 {
+		return nil, fmt.Errorf("shader config values must all be positive: %+v", config)
 	}
 
 	var src bytes.Buffer
-	if err := kageTemplate.Execute(&src, limits); err != nil {
+	if err := kageTemplate.Execute(&src, config); err != nil {
 		return nil, fmt.Errorf("generate metaball shader source: %w", err)
 	}
 
@@ -58,7 +73,7 @@ func NewMetaballShader(limits ShaderLimits) (*MetaballShader, error) {
 		return nil, fmt.Errorf("compile metaball shader: %w", err)
 	}
 
-	return &MetaballShader{shader: shader, limits: limits}, nil
+	return &MetaballShader{shader: shader, config: config}, nil
 }
 
 // packCircles packs circles into vec4(x, y, radius, unused) entries, padded
@@ -103,27 +118,26 @@ func (s *MetaballShader) Draw(
 	main Group,
 	other Group,
 	color [3]float32,
-	smoothK float32,
 ) error {
-	if len(main.Circles) > s.limits.MainCircles ||
-		len(main.Bridges) > s.limits.MainBridges ||
-		len(other.Circles) > s.limits.OtherCircles ||
-		len(other.Bridges) > s.limits.OtherBridges {
+	if len(main.Circles) > s.config.MainCircles ||
+		len(main.Bridges) > s.config.MainBridges ||
+		len(other.Circles) > s.config.OtherCircles ||
+		len(other.Bridges) > s.config.OtherBridges {
 		return fmt.Errorf(
 			"metaball counts exceed shader capacity: main circles %d/%d, main bridges %d/%d, other circles %d/%d, other bridges %d/%d",
-			len(main.Circles), s.limits.MainCircles,
-			len(main.Bridges), s.limits.MainBridges,
-			len(other.Circles), s.limits.OtherCircles,
-			len(other.Bridges), s.limits.OtherBridges,
+			len(main.Circles), s.config.MainCircles,
+			len(main.Bridges), s.config.MainBridges,
+			len(other.Circles), s.config.OtherCircles,
+			len(other.Bridges), s.config.OtherBridges,
 		)
 	}
 
-	mainEnds, mainRadii, err := packBridges(main.Circles, main.Bridges, s.limits.MainBridges)
+	mainEnds, mainRadii, err := packBridges(main.Circles, main.Bridges, s.config.MainBridges)
 	if err != nil {
 		return err
 	}
 
-	otherEnds, otherRadii, err := packBridges(other.Circles, other.Bridges, s.limits.OtherBridges)
+	otherEnds, otherRadii, err := packBridges(other.Circles, other.Bridges, s.config.OtherBridges)
 	if err != nil {
 		return err
 	}
@@ -135,18 +149,17 @@ func (s *MetaballShader) Draw(
 			float32(w),
 			float32(h),
 		},
-		"SmoothK":   smoothK,
 		"MainColor": color[:],
 
 		"MainCircleCount": len(main.Circles),
-		"MainCircles":     packCircles(main.Circles, s.limits.MainCircles),
+		"MainCircles":     packCircles(main.Circles, s.config.MainCircles),
 
 		"MainBridgeCount": len(main.Bridges),
 		"MainBridgeEnds":  mainEnds,
 		"MainBridgeRadii": mainRadii,
 
 		"OtherCircleCount": len(other.Circles),
-		"OtherCircles":     packCircles(other.Circles, s.limits.OtherCircles),
+		"OtherCircles":     packCircles(other.Circles, s.config.OtherCircles),
 
 		"OtherBridgeCount": len(other.Bridges),
 		"OtherBridgeEnds":  otherEnds,

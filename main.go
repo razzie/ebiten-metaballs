@@ -56,11 +56,12 @@ func NewGame() (*Game, error) {
 		},
 	}
 
-	shader, err := NewMetaballShader(ShaderLimits{
+	shader, err := NewMetaballShader(ShaderConfig{
 		MainCircles:  8,
 		MainBridges:  4,
 		OtherCircles: 8,
 		OtherBridges: 4,
+		SmoothK:      0.1,
 	})
 	if err != nil {
 		return nil, err
@@ -133,9 +134,6 @@ func (g *Game) Draw(screen *ebiten.Image) {
 
 		// Main metaball color.
 		[3]float32{1, 0, 0},
-
-		// Smooth-min radius.
-		0.1,
 	)
 	if err != nil {
 		panic(err)
