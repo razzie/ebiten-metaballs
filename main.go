@@ -56,7 +56,12 @@ func NewGame() (*Game, error) {
 		},
 	}
 
-	shader, err := NewMetaballShader(mainGroup, otherGroup)
+	shader, err := NewMetaballShader(ShaderLimits{
+		MainCircles:  8,
+		MainBridges:  4,
+		OtherCircles: 8,
+		OtherBridges: 4,
+	})
 	if err != nil {
 		return nil, err
 	}

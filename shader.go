@@ -9,8 +9,18 @@ import (
 	"github.com/hajimehoshi/ebiten/v2"
 )
 
-//go:embed shader.kage
-var kageTemplate string
+//go:embed shader.kage.tmpl
+var kageSource string
+
+var kageTemplate = template.Must(template.New("shader").Parse(kageSource))
+
+// ShaderLimits sets the fixed-size array capacities baked into the compiled Kage shader.
+type ShaderLimits struct {
+	MainCircles  int
+	MainBridges  int
+	OtherCircles int
+	OtherBridges int
+}
 
 type Circle struct {
 	X, Y   float32
@@ -29,74 +39,47 @@ type Group struct {
 
 type MetaballShader struct {
 	shader *ebiten.Shader
-
-	mainCircles  int
-	mainBridges  int
-	otherCircles int
-	otherBridges int
+	limits ShaderLimits
 }
 
-func NewMetaballShader(main, other Group) (*MetaballShader, error) {
-	data := struct {
-		MainCircles  int
-		MainBridges  int
-		OtherCircles int
-		OtherBridges int
-	}{
-		MainCircles:  len(main.Circles),
-		MainBridges:  len(main.Bridges),
-		OtherCircles: len(other.Circles),
-		OtherBridges: len(other.Bridges),
-	}
-
-	t, err := template.New("metaballs").Funcs(template.FuncMap{
-		"seq": func(n int) []int {
-			r := make([]int, n)
-			for i := range r {
-				r[i] = i
-			}
-			return r
-		},
-	}).Parse(kageTemplate)
-	if err != nil {
-		return nil, err
+func NewMetaballShader(limits ShaderLimits) (*MetaballShader, error) {
+	if limits.MainCircles <= 0 || limits.MainBridges <= 0 ||
+		limits.OtherCircles <= 0 || limits.OtherBridges <= 0 {
+		return nil, fmt.Errorf("shader limits must all be positive: %+v", limits)
 	}
 
 	var src bytes.Buffer
-	if err := t.Execute(&src, data); err != nil {
-		return nil, err
+	if err := kageTemplate.Execute(&src, limits); err != nil {
+		return nil, fmt.Errorf("generate metaball shader source: %w", err)
 	}
 
 	shader, err := ebiten.NewShader(src.Bytes())
 	if err != nil {
-		return nil, fmt.Errorf("compile metaball shader: %w\n\n%s", err, src.String())
+		return nil, fmt.Errorf("compile metaball shader: %w", err)
 	}
 
-	return &MetaballShader{
-		shader:       shader,
-		mainCircles:  data.MainCircles,
-		mainBridges:  data.MainBridges,
-		otherCircles: data.OtherCircles,
-		otherBridges: data.OtherBridges,
-	}, nil
+	return &MetaballShader{shader: shader, limits: limits}, nil
 }
 
-func packCircles(circles []Circle) []float32 {
-	out := make([]float32, 0, len(circles)*4)
+// packCircles packs circles into vec4(x, y, radius, unused) entries, padded
+// with zero entries up to max so the uniform array length matches the shader.
+func packCircles(circles []Circle, max int) []float32 {
+	out := make([]float32, max*4)
 
-	for _, c := range circles {
-		// vec4(x, y, radius, unused)
-		out = append(out, c.X, c.Y, c.Radius, 0)
+	for i, c := range circles {
+		out[i*4], out[i*4+1], out[i*4+2] = c.X, c.Y, c.Radius
 	}
 
 	return out
 }
 
-func packBridges(circles []Circle, bridges []Bridge) (ends, radii []float32, err error) {
-	ends = make([]float32, 0, len(bridges)*4)
-	radii = make([]float32, 0, len(bridges)*3)
+// packBridges packs bridges into vec4(a.x, a.y, b.x, b.y) ends and
+// vec3(radiusA, radiusMiddle, radiusB) radii, padded up to max.
+func packBridges(circles []Circle, bridges []Bridge, max int) (ends, radii []float32, err error) {
+	ends = make([]float32, max*4)
+	radii = make([]float32, max*3)
 
-	for _, br := range bridges {
+	for i, br := range bridges {
 		if br.A < 0 || br.A >= len(circles) ||
 			br.B < 0 || br.B >= len(circles) {
 			return nil, nil, fmt.Errorf(
@@ -108,16 +91,8 @@ func packBridges(circles []Circle, bridges []Bridge) (ends, radii []float32, err
 		a := circles[br.A]
 		b := circles[br.B]
 
-		// vec4(a.x, a.y, b.x, b.y)
-		ends = append(ends, a.X, a.Y, b.X, b.Y)
-
-		// vec3(radiusA, radiusMiddle, radiusB)
-		radii = append(
-			radii,
-			a.Radius,
-			br.MiddleRadius,
-			b.Radius,
-		)
+		ends[i*4], ends[i*4+1], ends[i*4+2], ends[i*4+3] = a.X, a.Y, b.X, b.Y
+		radii[i*3], radii[i*3+1], radii[i*3+2] = a.Radius, br.MiddleRadius, b.Radius
 	}
 
 	return ends, radii, nil
@@ -130,19 +105,25 @@ func (s *MetaballShader) Draw(
 	color [3]float32,
 	smoothK float32,
 ) error {
-	if len(main.Circles) != s.mainCircles ||
-		len(main.Bridges) != s.mainBridges ||
-		len(other.Circles) != s.otherCircles ||
-		len(other.Bridges) != s.otherBridges {
-		return fmt.Errorf("metaball counts changed; shader must be recompiled")
+	if len(main.Circles) > s.limits.MainCircles ||
+		len(main.Bridges) > s.limits.MainBridges ||
+		len(other.Circles) > s.limits.OtherCircles ||
+		len(other.Bridges) > s.limits.OtherBridges {
+		return fmt.Errorf(
+			"metaball counts exceed shader capacity: main circles %d/%d, main bridges %d/%d, other circles %d/%d, other bridges %d/%d",
+			len(main.Circles), s.limits.MainCircles,
+			len(main.Bridges), s.limits.MainBridges,
+			len(other.Circles), s.limits.OtherCircles,
+			len(other.Bridges), s.limits.OtherBridges,
+		)
 	}
 
-	mainEnds, mainRadii, err := packBridges(main.Circles, main.Bridges)
+	mainEnds, mainRadii, err := packBridges(main.Circles, main.Bridges, s.limits.MainBridges)
 	if err != nil {
 		return err
 	}
 
-	otherEnds, otherRadii, err := packBridges(other.Circles, other.Bridges)
+	otherEnds, otherRadii, err := packBridges(other.Circles, other.Bridges, s.limits.OtherBridges)
 	if err != nil {
 		return err
 	}
@@ -156,22 +137,20 @@ func (s *MetaballShader) Draw(
 		},
 		"SmoothK":   smoothK,
 		"MainColor": color[:],
-	}
 
-	if s.mainCircles > 0 {
-		uniforms["MainCircles"] = packCircles(main.Circles)
-	}
-	if s.mainBridges > 0 {
-		uniforms["MainBridgeEnds"] = mainEnds
-		uniforms["MainBridgeRadii"] = mainRadii
-	}
+		"MainCircleCount": len(main.Circles),
+		"MainCircles":     packCircles(main.Circles, s.limits.MainCircles),
 
-	if s.otherCircles > 0 {
-		uniforms["OtherCircles"] = packCircles(other.Circles)
-	}
-	if s.otherBridges > 0 {
-		uniforms["OtherBridgeEnds"] = otherEnds
-		uniforms["OtherBridgeRadii"] = otherRadii
+		"MainBridgeCount": len(main.Bridges),
+		"MainBridgeEnds":  mainEnds,
+		"MainBridgeRadii": mainRadii,
+
+		"OtherCircleCount": len(other.Circles),
+		"OtherCircles":     packCircles(other.Circles, s.limits.OtherCircles),
+
+		"OtherBridgeCount": len(other.Bridges),
+		"OtherBridgeEnds":  otherEnds,
+		"OtherBridgeRadii": otherRadii,
 	}
 
 	dst.DrawRectShader(w, h, s.shader, &ebiten.DrawRectShaderOptions{
