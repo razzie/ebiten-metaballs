@@ -9,7 +9,7 @@ const MaxOtherBridges = {{.OtherBridges}}
 const SmoothK = {{float .SmoothK}}
 
 var Resolution vec2
-var MainColor vec3
+var MainColor vec4
 
 var MainCircleCount int
 var MainCircles [MaxMainCircles]vec4
@@ -163,5 +163,5 @@ func Fragment(dstPos vec4) vec4 {
 		discard()
 	}
 
-	return vec4(MainColor, 1.0)
+	return MainColor
 }

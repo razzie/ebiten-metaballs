@@ -50,7 +50,17 @@ type Bridge struct {
 type Group struct {
 	Circles []Circle
 	Bridges []Bridge
-	Color   [3]float32
+	Color   ebiten.ColorScale
+}
+
+// NewColorScale builds an ebiten.ColorScale since its fields are unexported.
+func NewColorScale(r, g, b, a float32) ebiten.ColorScale {
+	var cs ebiten.ColorScale
+	cs.SetR(r)
+	cs.SetG(g)
+	cs.SetB(b)
+	cs.SetA(a)
+	return cs
 }
 
 // combineGroups merges every group except the one at exclude into a single
@@ -192,7 +202,7 @@ func (s *MetaballShader) drawPass(
 	dst *ebiten.Image,
 	main Group,
 	other Group,
-	color [3]float32,
+	color ebiten.ColorScale,
 ) error {
 	if len(main.Circles) > s.config.MainCircles ||
 		len(main.Bridges) > s.config.MainBridges ||
@@ -224,7 +234,7 @@ func (s *MetaballShader) drawPass(
 			float32(w),
 			float32(h),
 		},
-		"MainColor": color[:],
+		"MainColor": []float32{color.R(), color.G(), color.B(), color.A()},
 
 		"MainCircleCount": len(main.Circles),
 		"MainCircles":     packCircles(main.Circles, s.config.MainCircles),

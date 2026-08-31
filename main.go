@@ -34,7 +34,7 @@ func NewGame() (*Game, error) {
 				{X: 0.5, Y: 0.55, Radius: 0.1},
 				{X: 0.5, Y: 0.40, Radius: 0.075},
 			},
-			Color: [3]float32{1, 0, 0},
+			Color: NewColorScale(1, 0, 0, 1),
 		},
 		groupBlue: {
 			Circles: []Circle{
@@ -47,13 +47,13 @@ func NewGame() (*Game, error) {
 				{A: 0, B: 2, MiddleRadius: 0.005},
 				{A: 2, B: 3, MiddleRadius: 0.005},
 			},
-			Color: [3]float32{0, 0, 1},
+			Color: NewColorScale(0, 0, 1, 1),
 		},
 		groupGreen: {
 			Circles: []Circle{
 				{X: 0.5, Y: 0.5, Radius: 0.05},
 			},
-			Color: [3]float32{0, 1, 0},
+			Color: NewColorScale(0, 1, 0, 1),
 		},
 	}
 
