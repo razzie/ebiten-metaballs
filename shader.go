@@ -50,6 +50,67 @@ type Bridge struct {
 type Group struct {
 	Circles []Circle
 	Bridges []Bridge
+	Color   [3]float32
+}
+
+// combineGroups merges every group except the one at exclude into a single
+// Group, offsetting bridge indices to match the concatenated circle slice.
+func combineGroups(groups []Group, exclude int) Group {
+	var out Group
+
+	for i, g := range groups {
+		if i == exclude {
+			continue
+		}
+
+		offset := len(out.Circles)
+		out.Circles = append(out.Circles, g.Circles...)
+
+		for _, b := range g.Bridges {
+			out.Bridges = append(out.Bridges, Bridge{
+				A:            b.A + offset,
+				B:            b.B + offset,
+				MiddleRadius: b.MiddleRadius,
+			})
+		}
+	}
+
+	return out
+}
+
+// ConfigForGroups derives shader array capacities from a set of groups: main
+// capacities cover the largest single group, other capacities cover the sum
+// of all groups (a safe upper bound for any combined "other" pass).
+func ConfigForGroups(groups []Group, smoothK float32) ShaderConfig {
+	var mainCircles, mainBridges, totalCircles, totalBridges int
+
+	for _, g := range groups {
+		if len(g.Circles) > mainCircles {
+			mainCircles = len(g.Circles)
+		}
+		if len(g.Bridges) > mainBridges {
+			mainBridges = len(g.Bridges)
+		}
+
+		totalCircles += len(g.Circles)
+		totalBridges += len(g.Bridges)
+	}
+
+	// Kage array sizes must be positive even when a group has no bridges.
+	if mainBridges == 0 {
+		mainBridges = 1
+	}
+	if totalBridges == 0 {
+		totalBridges = 1
+	}
+
+	return ShaderConfig{
+		MainCircles:  mainCircles,
+		MainBridges:  mainBridges,
+		OtherCircles: totalCircles,
+		OtherBridges: totalBridges,
+		SmoothK:      smoothK,
+	}
 }
 
 type MetaballShader struct {
@@ -113,7 +174,21 @@ func packBridges(circles []Circle, bridges []Bridge, max int) (ends, radii []flo
 	return ends, radii, nil
 }
 
-func (s *MetaballShader) Draw(
+// Draw renders each group in its own pass, using the remaining groups
+// combined as the "other" field to drive the squeezing effect.
+func (s *MetaballShader) Draw(dst *ebiten.Image, groups []Group) error {
+	for i, g := range groups {
+		other := combineGroups(groups, i)
+
+		if err := s.drawPass(dst, g, other, g.Color); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (s *MetaballShader) drawPass(
 	dst *ebiten.Image,
 	main Group,
 	other Group,
