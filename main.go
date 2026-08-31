@@ -57,7 +57,7 @@ func NewGame() (*Game, error) {
 		},
 	}
 
-	shader, err := NewMetaballShader(ConfigForGroups(groups, 0.1))
+	shader, err := NewMetaballShader(ConfigForGroups(groups, 0.1, 1, 0, 0.04))
 	if err != nil {
 		return nil, err
 	}

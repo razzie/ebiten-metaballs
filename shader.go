@@ -4,6 +4,7 @@ import (
 	"bytes"
 	_ "embed"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"text/template"
@@ -16,6 +17,7 @@ var kageSource string
 
 var kageTemplate = template.Must(template.New("shader").Funcs(template.FuncMap{
 	"float": formatKageFloat,
+	"vec2":  formatKageVec2,
 }).Parse(kageSource))
 
 // formatKageFloat renders f as a Kage float literal, which requires a decimal point.
@@ -27,14 +29,31 @@ func formatKageFloat(f float32) string {
 	return s
 }
 
+// formatKageVec2 renders x, y as a Kage vec2(...) literal.
+func formatKageVec2(x, y float32) string {
+	return fmt.Sprintf("vec2(%s, %s)", formatKageFloat(x), formatKageFloat(y))
+}
+
 // ShaderConfig sets the compile-time constants baked into the generated Kage shader:
-// fixed-size array capacities plus the smooth-min blending radius.
+// fixed-size array capacities, the smooth-min blending radius, and edge shading.
+// LightDirX/LightDirY of (0, 0) disables edge shading entirely (no gradients computed).
 type ShaderConfig struct {
-	MainCircles  int
-	MainBridges  int
-	OtherCircles int
-	OtherBridges int
-	SmoothK      float32
+	MainCircles   int
+	MainBridges   int
+	OtherCircles  int
+	OtherBridges  int
+	SmoothK       float32
+	LightDirX     float32
+	LightDirY     float32
+	EdgeThickness float32
+}
+
+// shaderTemplateData augments ShaderConfig with values derived for code generation.
+type shaderTemplateData struct {
+	ShaderConfig
+	EdgeShadingEnabled   bool
+	NeedsCapsuleField    bool
+	NeedsCapsuleDistance bool
 }
 
 type Circle struct {
@@ -90,8 +109,11 @@ func combineGroups(groups []Group, exclude int) Group {
 
 // ConfigForGroups derives shader array capacities from a set of groups: main
 // capacities cover the largest single group, other capacities cover the sum
-// of all groups (a safe upper bound for any combined "other" pass).
-func ConfigForGroups(groups []Group, smoothK float32) ShaderConfig {
+// of all groups (a safe upper bound for any combined "other" pass). Bridge
+// and other-circle capacities are left at 0 when unused, so the generated
+// shader can skip those loops entirely. lightDirX/lightDirY of (0, 0)
+// disables edge shading.
+func ConfigForGroups(groups []Group, smoothK float32, lightDirX, lightDirY, edgeThickness float32) ShaderConfig {
 	var mainCircles, mainBridges, totalCircles, totalBridges int
 
 	for _, g := range groups {
@@ -106,20 +128,15 @@ func ConfigForGroups(groups []Group, smoothK float32) ShaderConfig {
 		totalBridges += len(g.Bridges)
 	}
 
-	// Kage array sizes must be positive even when a group has no bridges.
-	if mainBridges == 0 {
-		mainBridges = 1
-	}
-	if totalBridges == 0 {
-		totalBridges = 1
-	}
-
 	return ShaderConfig{
-		MainCircles:  mainCircles,
-		MainBridges:  mainBridges,
-		OtherCircles: totalCircles,
-		OtherBridges: totalBridges,
-		SmoothK:      smoothK,
+		MainCircles:   mainCircles,
+		MainBridges:   mainBridges,
+		OtherCircles:  totalCircles,
+		OtherBridges:  totalBridges,
+		SmoothK:       smoothK,
+		LightDirX:     lightDirX,
+		LightDirY:     lightDirY,
+		EdgeThickness: edgeThickness,
 	}
 }
 
@@ -129,13 +146,28 @@ type MetaballShader struct {
 }
 
 func NewMetaballShader(config ShaderConfig) (*MetaballShader, error) {
-	if config.MainCircles <= 0 || config.MainBridges <= 0 ||
-		config.OtherCircles <= 0 || config.OtherBridges <= 0 || config.SmoothK <= 0 {
-		return nil, fmt.Errorf("shader config values must all be positive: %+v", config)
+	if config.MainCircles <= 0 || config.MainBridges < 0 ||
+		config.OtherCircles < 0 || config.OtherBridges < 0 || config.SmoothK <= 0 {
+		return nil, fmt.Errorf("invalid shader config: %+v", config)
 	}
 
+	data := shaderTemplateData{ShaderConfig: config}
+
+	if length := math.Hypot(float64(config.LightDirX), float64(config.LightDirY)); length > 0 {
+		data.EdgeShadingEnabled = true
+		data.LightDirX = float32(float64(config.LightDirX) / length)
+		data.LightDirY = float32(float64(config.LightDirY) / length)
+
+		if config.EdgeThickness <= 0 {
+			return nil, fmt.Errorf("invalid shader config: EdgeThickness must be positive when edge shading is enabled: %+v", config)
+		}
+	}
+
+	data.NeedsCapsuleField = data.EdgeShadingEnabled && config.MainBridges > 0
+	data.NeedsCapsuleDistance = config.OtherBridges > 0 || (!data.EdgeShadingEnabled && config.MainBridges > 0)
+
 	var src bytes.Buffer
-	if err := kageTemplate.Execute(&src, config); err != nil {
+	if err := kageTemplate.Execute(&src, data); err != nil {
 		return nil, fmt.Errorf("generate metaball shader source: %w", err)
 	}
 
@@ -217,16 +249,6 @@ func (s *MetaballShader) drawPass(
 		)
 	}
 
-	mainEnds, mainRadii, err := packBridges(main.Circles, main.Bridges, s.config.MainBridges)
-	if err != nil {
-		return err
-	}
-
-	otherEnds, otherRadii, err := packBridges(other.Circles, other.Bridges, s.config.OtherBridges)
-	if err != nil {
-		return err
-	}
-
 	w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
 
 	uniforms := map[string]any{
@@ -238,17 +260,33 @@ func (s *MetaballShader) drawPass(
 
 		"MainCircleCount": len(main.Circles),
 		"MainCircles":     packCircles(main.Circles, s.config.MainCircles),
+	}
 
-		"MainBridgeCount": len(main.Bridges),
-		"MainBridgeEnds":  mainEnds,
-		"MainBridgeRadii": mainRadii,
+	if s.config.MainBridges > 0 {
+		mainEnds, mainRadii, err := packBridges(main.Circles, main.Bridges, s.config.MainBridges)
+		if err != nil {
+			return err
+		}
 
-		"OtherCircleCount": len(other.Circles),
-		"OtherCircles":     packCircles(other.Circles, s.config.OtherCircles),
+		uniforms["MainBridgeCount"] = len(main.Bridges)
+		uniforms["MainBridgeEnds"] = mainEnds
+		uniforms["MainBridgeRadii"] = mainRadii
+	}
 
-		"OtherBridgeCount": len(other.Bridges),
-		"OtherBridgeEnds":  otherEnds,
-		"OtherBridgeRadii": otherRadii,
+	if s.config.OtherCircles > 0 {
+		uniforms["OtherCircleCount"] = len(other.Circles)
+		uniforms["OtherCircles"] = packCircles(other.Circles, s.config.OtherCircles)
+	}
+
+	if s.config.OtherBridges > 0 {
+		otherEnds, otherRadii, err := packBridges(other.Circles, other.Bridges, s.config.OtherBridges)
+		if err != nil {
+			return err
+		}
+
+		uniforms["OtherBridgeCount"] = len(other.Bridges)
+		uniforms["OtherBridgeEnds"] = otherEnds
+		uniforms["OtherBridgeRadii"] = otherRadii
 	}
 
 	dst.DrawRectShader(w, h, s.shader, &ebiten.DrawRectShaderOptions{
