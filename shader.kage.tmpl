@@ -25,28 +25,34 @@ var OtherBridgeCount int
 var OtherBridgeEnds [MaxOtherBridges]vec4
 var OtherBridgeRadii [MaxOtherBridges]vec3
 
-func smin(a, b, k float) float {
-	h := clamp(0.5+0.5*(b-a)/k, 0.0, 1.0)
-	return mix(b, a, h) - k*h*(1.0-h)
+// xy = surface gradient, z = distance
+func sminField(a, b vec3, k float) vec3 {
+	h := clamp(0.5+0.5*(b.z-a.z)/k, 0.0, 1.0)
+	dist := mix(b.z, a.z, h) - k*h*(1.0-h)
+	grad := mix(b.xy, a.xy, h)
+	return vec3(grad, dist)
 }
 
-func sdCircleDistance(p vec2, circle vec4) float {
-	return length(p-circle.xy) - circle.z
+func sdCircleField(p vec2, circle vec4) vec3 {
+	d := p - circle.xy
+	grad := d * inversesqrt(max(dot(d, d), 1e-12))
+	return vec3(grad, length(d)-circle.z)
 }
 
-func sdSplineCapsuleDistance(
+func sdSplineCapsuleField(
 	p vec2,
 	a vec2,
 	b vec2,
 	r1 float,
 	r2 float,
 	r3 float,
-) float {
+) vec3 {
 	ba := b - a
 	pa := p - a
 
 	ba2 := max(dot(ba, ba), 1e-12)
-	t := clamp(dot(pa, ba)/ba2, 0.0, 1.0)
+	invBa2 := 1.0 / ba2
+	t := clamp(dot(pa, ba)*invBa2, 0.0, 1.0)
 
 	q := pa - ba*t
 
@@ -56,12 +62,29 @@ func sdSplineCapsuleDistance(
 
 	ra := mix(r1, r2, side)
 	rb := mix(r2, r3, side)
+	dr := rb - ra
 
 	// smoothstep interpolation.
 	s := x*x*(3.0-2.0*x)
-	radius := mix(ra, rb, s)
+	radius := ra + dr*s
 
-	return length(q) - radius
+	// d(radius)/dt, to account for the radius sweep when computing the gradient.
+	drdt := 12.0 * dr * x * (1.0 - x)
+
+	q2 := dot(q, q)
+	invQ := inversesqrt(max(q2, 1e-12))
+
+	grad := q*invQ - drdt*ba*invBa2
+
+	return vec3(grad, q2*invQ-radius)
+}
+
+func edge(dist float, normal vec2) float {
+	lightDir := vec2(1.0, 0.0)
+	invEdgeThickness := 1.0 / -0.04
+	u := clamp(dist*invEdgeThickness, 0.0, 1.0)
+	factor := 1.0 - u*(2.0-u)
+	return mix(0.75, 1.0, factor*dot(normal, lightDir))
 }
 
 func Fragment(dstPos vec4) vec4 {
@@ -74,7 +97,7 @@ func Fragment(dstPos vec4) vec4 {
 	// Main visible field
 	// ------------------------------------------------------------
 
-	mainDist := big
+	mainField := vec3(0.0, 0.0, big)
 
 	for i := 0; i < MaxMainCircles; i++ {
 		// Kage loop bounds must be constant; the real count is enforced with break.
@@ -82,9 +105,9 @@ func Fragment(dstPos vec4) vec4 {
 			break
 		}
 
-		mainDist = smin(
-			mainDist,
-			sdCircleDistance(uv, MainCircles[i]),
+		mainField = sminField(
+			mainField,
+			sdCircleField(uv, MainCircles[i]),
 			k,
 		)
 	}
@@ -97,9 +120,9 @@ func Fragment(dstPos vec4) vec4 {
 		end := MainBridgeEnds[i]
 		radius := MainBridgeRadii[i]
 
-		mainDist = smin(
-			mainDist,
-			sdSplineCapsuleDistance(
+		mainField = sminField(
+			mainField,
+			sdSplineCapsuleField(
 				uv,
 				end.xy,
 				end.zw,
@@ -115,16 +138,16 @@ func Fragment(dstPos vec4) vec4 {
 	// Combined invisible "everything else" field
 	// ------------------------------------------------------------
 
-	otherDist := big
+	otherField := vec3(0.0, 0.0, big)
 
 	for i := 0; i < MaxOtherCircles; i++ {
 		if i >= OtherCircleCount {
 			break
 		}
 
-		otherDist = smin(
-			otherDist,
-			sdCircleDistance(uv, OtherCircles[i]),
+		otherField = sminField(
+			otherField,
+			sdCircleField(uv, OtherCircles[i]),
 			k,
 		)
 	}
@@ -137,9 +160,9 @@ func Fragment(dstPos vec4) vec4 {
 		end := OtherBridgeEnds[i]
 		radius := OtherBridgeRadii[i]
 
-		otherDist = smin(
-			otherDist,
-			sdSplineCapsuleDistance(
+		otherField = sminField(
+			otherField,
+			sdSplineCapsuleField(
 				uv,
 				end.xy,
 				end.zw,
@@ -155,13 +178,15 @@ func Fragment(dstPos vec4) vec4 {
 	// Squeezing
 	// ------------------------------------------------------------
 
-	squeezedDist :=
-		mainDist -
-		smin(otherDist, 0.0, k*0.5)
+	squeeze := sminField(otherField, vec3(0.0, 0.0, 0.0), k*0.5)
+	squeezedField := vec3(mainField.xy-squeeze.xy, mainField.z-squeeze.z)
 
-	if squeezedDist >= 0.0 {
+	if squeezedField.z >= 0.0 {
 		discard()
 	}
 
-	return MainColor
+	normal := squeezedField.xy * inversesqrt(max(dot(squeezedField.xy, squeezedField.xy), 1e-12))
+	factor := edge(squeezedField.z, normal)
+
+	return vec4(MainColor.rgb*factor, MainColor.a)
 }
