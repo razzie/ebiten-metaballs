@@ -5,6 +5,8 @@ import (
 	"math"
 	"time"
 
+	metaballs "github.com/razzie/ebiten-metaballs"
+
 	"github.com/hajimehoshi/ebiten/v2"
 )
 
@@ -20,44 +22,44 @@ const (
 )
 
 type Game struct {
-	shader *MetaballShader
+	shader *metaballs.MetaballShader
 
-	groups []Group
+	groups []metaballs.Group
 
 	startTime time.Time
 }
 
 func NewGame() (*Game, error) {
-	groups := []Group{
+	groups := []metaballs.Group{
 		groupRed: {
-			Circles: []Circle{
+			Circles: []metaballs.Circle{
 				{X: 0.5, Y: 0.55, Radius: 0.1},
 				{X: 0.5, Y: 0.40, Radius: 0.075},
 			},
-			Color: NewColorScale(1, 0, 0, 1),
+			Color: metaballs.NewColorScale(1, 0, 0, 1),
 		},
 		groupBlue: {
-			Circles: []Circle{
+			Circles: []metaballs.Circle{
 				{X: 0.5, Y: 0.475, Radius: 0.075},
 				{X: 0.5, Y: 0.475, Radius: 0.05},
 				{X: 0.3, Y: 0.35, Radius: 0.025},
 				{X: 0.2, Y: 0.8, Radius: 0.03},
 			},
-			Bridges: []Bridge{
+			Bridges: []metaballs.Bridge{
 				{A: 0, B: 2, MiddleRadius: 0.005},
 				{A: 2, B: 3, MiddleRadius: 0.005},
 			},
-			Color: NewColorScale(0, 0, 1, 1),
+			Color: metaballs.NewColorScale(0, 0, 1, 1),
 		},
 		groupGreen: {
-			Circles: []Circle{
+			Circles: []metaballs.Circle{
 				{X: 0.5, Y: 0.5, Radius: 0.05},
 			},
-			Color: NewColorScale(0, 1, 0, 1),
+			Color: metaballs.NewColorScale(0, 1, 0, 1),
 		},
 	}
 
-	shader, err := NewMetaballShader(ConfigForGroups(groups, 0.1, 1, 0, 0.04))
+	shader, err := metaballs.NewMetaballShader(metaballs.ConfigForGroups(groups, 0.1, 1, 0, 0.04))
 	if err != nil {
 		return nil, err
 	}
