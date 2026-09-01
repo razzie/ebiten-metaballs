@@ -217,12 +217,31 @@ func packBridges(circles []Circle, bridges []Bridge, max int) (ends, radii []flo
 }
 
 // Draw renders each group in its own pass, using the remaining groups
-// combined as the "other" field to drive the squeezing effect.
+// combined as the "other" field to drive the squeezing effect. The uv space
+// is normalized against dst's own size.
 func (s *MetaballShader) Draw(dst *ebiten.Image, groups []Group) error {
+	w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
+	return s.DrawRegion(dst, groups, [2]float32{float32(w), float32(h)})
+}
+
+// DrawRegion is like Draw, but normalizes uv against an explicit resolution
+// instead of dst's own size. This allows dst to be a sub-image (e.g. one
+// tile of a larger canvas) while circle coordinates stay in the full
+// canvas's uv space.
+func (s *MetaballShader) DrawRegion(dst *ebiten.Image, groups []Group, resolution [2]float32) error {
+	return s.DrawRegionAt(dst, groups, resolution, [2]float32{0, 0})
+}
+
+// DrawRegionAt is like DrawRegion, but additionally offsets the fragment
+// position by origin before normalizing by resolution. This is required
+// when dst is a sub-image: Kage's dstPos is local to the sub-image's own
+// bounds, so origin (the sub-image's pixel offset within the full canvas)
+// must be added back to recover the full canvas's uv space.
+func (s *MetaballShader) DrawRegionAt(dst *ebiten.Image, groups []Group, resolution, origin [2]float32) error {
 	for i, g := range groups {
 		other := combineGroups(groups, i)
 
-		if err := s.drawPass(dst, g, other, g.Color); err != nil {
+		if err := s.drawPass(dst, g, other, g.Color, resolution, origin); err != nil {
 			return err
 		}
 	}
@@ -235,6 +254,8 @@ func (s *MetaballShader) drawPass(
 	main Group,
 	other Group,
 	color ebiten.ColorScale,
+	resolution [2]float32,
+	origin [2]float32,
 ) error {
 	if len(main.Circles) > s.config.MainCircles ||
 		len(main.Bridges) > s.config.MainBridges ||
@@ -253,8 +274,8 @@ func (s *MetaballShader) drawPass(
 
 	uniforms := map[string]any{
 		"Resolution": []float32{
-			float32(w),
-			float32(h),
+			resolution[0],
+			resolution[1],
 		},
 		"MainColor": []float32{color.R(), color.G(), color.B(), color.A()},
 
@@ -289,7 +310,10 @@ func (s *MetaballShader) drawPass(
 		uniforms["OtherBridgeRadii"] = otherRadii
 	}
 
+	var transform ebiten.GeoM
+	transform.Translate(float64(origin[0]), float64(origin[1]))
 	dst.DrawRectShader(w, h, s.shader, &ebiten.DrawRectShaderOptions{
+		GeoM:     transform,
 		Uniforms: uniforms,
 	})
 
