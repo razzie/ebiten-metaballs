@@ -252,22 +252,44 @@ func filterGroupsForTile(groups []Group, tile tileBounds) (filtered []Group, mai
 	return filtered, mainCircles, mainBridges, otherCircles, otherBridges
 }
 
-// filterGroup filters g's circles down to those overlapping tile, remapping
-// bridge endpoints and dropping bridges with an endpoint outside the tile.
-// ok is false when no circles survive.
+// filterGroup filters g's circles down to those overlapping tile plus any
+// circle that is the far end of a bridge from an included circle (even if
+// off-tile, otherwise the bridge would pop in/out at tile borders),
+// remapping bridge endpoints accordingly. ok is false when no circles
+// survive.
 func filterGroup(g Group, tile tileBounds) (Group, bool) {
-	remap := make([]int, len(g.Circles))
-	var circles []Circle
-
+	included := make([]bool, len(g.Circles))
+	found := false
 	for i, c := range g.Circles {
 		if circleOverlapsTile(c, tile) {
-			remap[i] = len(circles) + 1 // +1 so the zero value means "dropped"
-			circles = append(circles, c)
+			included[i] = true
+			found = true
 		}
 	}
 
-	if len(circles) == 0 {
+	if !found {
 		return Group{}, false
+	}
+
+	// Propagate inclusion across bridge chains until it stops spreading.
+	for changed := true; changed; {
+		changed = false
+		for _, b := range g.Bridges {
+			if included[b.A] != included[b.B] {
+				included[b.A] = true
+				included[b.B] = true
+				changed = true
+			}
+		}
+	}
+
+	remap := make([]int, len(g.Circles))
+	var circles []Circle
+	for i, inc := range included {
+		if inc {
+			remap[i] = len(circles) + 1 // +1 so the zero value means "dropped"
+			circles = append(circles, g.Circles[i])
+		}
 	}
 
 	var bridges []Bridge
