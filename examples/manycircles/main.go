@@ -20,13 +20,13 @@ const (
 	circlesPerGroup = 170 // ~500 circles total across 3 groups
 	minRadius       = 0.01
 	maxRadius       = 0.02
-	minSpeed        = 0.05
-	maxSpeed        = 0.15
+	minSpeed        = 0.025
+	maxSpeed        = 0.1
 
 	smoothK       = 0.015
 	lightDirX     = 1
 	lightDirY     = -1
-	edgeThickness = 0.03
+	edgeThickness = 0.015
 )
 
 // vec2 is a plain 2D vector used for per-circle velocity.
@@ -87,9 +87,11 @@ func NewGame() (*Game, error) {
 	// Capacity tiers: shader pool from small (cheap, common case for sparse
 	// tiles) up to large (rare, dense tiles after subdivision).
 	tiers := []metaballs.ShaderConfig{
-		{MainCircles: 16, OtherCircles: 64, SmoothK: smoothK, LightDirX: lightDirX, LightDirY: lightDirY, EdgeThickness: edgeThickness},
-		{MainCircles: 64, OtherCircles: 256, SmoothK: smoothK, LightDirX: lightDirX, LightDirY: lightDirY, EdgeThickness: edgeThickness},
-		{MainCircles: 256, OtherCircles: 768, SmoothK: smoothK, LightDirX: lightDirX, LightDirY: lightDirY, EdgeThickness: edgeThickness},
+		{MainCircles: 16, OtherCircles: 16, SmoothK: smoothK, LightDirX: lightDirX, LightDirY: lightDirY, EdgeThickness: edgeThickness},
+		{MainCircles: 32, OtherCircles: 32, SmoothK: smoothK, LightDirX: lightDirX, LightDirY: lightDirY, EdgeThickness: edgeThickness},
+		//{MainCircles: 16, OtherCircles: 64, SmoothK: smoothK, LightDirX: lightDirX, LightDirY: lightDirY, EdgeThickness: edgeThickness},
+		//{MainCircles: 64, OtherCircles: 256, SmoothK: smoothK, LightDirX: lightDirX, LightDirY: lightDirY, EdgeThickness: edgeThickness},
+		//{MainCircles: 256, OtherCircles: 768, SmoothK: smoothK, LightDirX: lightDirX, LightDirY: lightDirY, EdgeThickness: edgeThickness},
 	}
 
 	renderer, err := metaballs.NewRenderer(metaballs.RendererConfig{
@@ -99,6 +101,7 @@ func NewGame() (*Game, error) {
 		MaxDepth:    3,
 		MinTileSize: 0.01,
 		Padding:     2 * smoothK,
+		Debug:       true,
 	})
 	if err != nil {
 		return nil, err
