@@ -3,8 +3,10 @@ package metaballs
 import (
 	"fmt"
 	"image"
+	"image/color"
 
 	"github.com/hajimehoshi/ebiten/v2"
+	"github.com/hajimehoshi/ebiten/v2/vector"
 )
 
 // RendererConfig configures a Renderer: a pool of shaders for different
@@ -31,6 +33,11 @@ type RendererConfig struct {
 	// roughly SmoothK) stays correct across tile borders. Should be at
 	// least ~2x the shared SmoothK.
 	Padding float32
+
+	// Debug, when true, overlays every tile visited (skipped, subdivided, or
+	// drawn) with a semi-transparent outline: black top/left, white
+	// bottom/right.
+	Debug bool
 }
 
 // Renderer draws large numbers of circles by tiling the canvas, skipping
@@ -143,6 +150,11 @@ func (r *Renderer) drawTile(
 	depth int,
 	stats *Stats,
 ) error {
+	if r.cfg.Debug {
+		// Deferred so it draws last, on top of this tile's content and any children's.
+		defer r.drawDebugOutline(dst, resolution, tile)
+	}
+
 	padded := tile.padded(r.cfg.Padding)
 	filtered, mainCircles, mainBridges, otherCircles, otherBridges := filterGroupsForTile(groups, padded)
 
@@ -209,6 +221,28 @@ func (r *Renderer) pickTier(mainCircles, mainBridges, otherCircles, otherBridges
 		}
 	}
 	return -1
+}
+
+var (
+	debugTopLeftColor     = color.NRGBA{A: 128}
+	debugBottomRightColor = color.NRGBA{R: 255, G: 255, B: 255, A: 128}
+)
+
+// drawDebugOutline draws a 1px outline around tile: black top/left edges,
+// white bottom/right edges, both at ~0.5 alpha.
+func (r *Renderer) drawDebugOutline(dst *ebiten.Image, resolution [2]float32, tile tileBounds) {
+	pixelRect := tileToPixelRect(tile, resolution)
+	if pixelRect.Dx() <= 0 || pixelRect.Dy() <= 0 {
+		return
+	}
+
+	minX, minY := float32(pixelRect.Min.X), float32(pixelRect.Min.Y)
+	maxX, maxY := float32(pixelRect.Max.X), float32(pixelRect.Max.Y)
+
+	vector.StrokeLine(dst, minX, minY, maxX, minY, 1, debugTopLeftColor, false)
+	vector.StrokeLine(dst, minX, minY, minX, maxY, 1, debugTopLeftColor, false)
+	vector.StrokeLine(dst, minX, maxY, maxX, maxY, 1, debugBottomRightColor, false)
+	vector.StrokeLine(dst, maxX, minY, maxX, maxY, 1, debugBottomRightColor, false)
 }
 
 func tileToPixelRect(tile tileBounds, resolution [2]float32) image.Rectangle {
