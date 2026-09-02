@@ -172,7 +172,6 @@ func NewGame() (*Game, error) {
 		RootRows:    8,
 		MaxDepth:    3,
 		MinTileSize: 0.01,
-		Padding:     2 * smoothK,
 		Debug:       true,
 	})
 	if err != nil {

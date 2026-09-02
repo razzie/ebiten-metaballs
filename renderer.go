@@ -28,12 +28,6 @@ type RendererConfig struct {
 	// subdivision stops once a child tile would drop below it.
 	MinTileSize float32
 
-	// Padding is the uv-space margin added around a tile's bounds when
-	// collecting circles/bridges, so metaball blending (whose range is
-	// roughly SmoothK) stays correct across tile borders. Should be at
-	// least ~2x the shared SmoothK.
-	Padding float32
-
 	// Debug, when true, overlays every tile visited (skipped, subdivided, or
 	// drawn) with a semi-transparent outline: black top/left, white
 	// bottom/right.
@@ -155,8 +149,7 @@ func (r *Renderer) drawTile(
 		defer r.drawDebugOutline(dst, resolution, tile)
 	}
 
-	padded := tile.padded(r.cfg.Padding)
-	filtered, mainCircles, mainBridges, otherCircles, otherBridges := filterGroupsForTile(groups, padded)
+	filtered, mainCircles, mainBridges, otherCircles, otherBridges := filterGroupsForTile(groups, tile)
 
 	if len(filtered) == 0 {
 		stats.TilesSkipped++
@@ -260,10 +253,47 @@ func circleOverlapsTile(c Circle, tile tileBounds) bool {
 		c.Y+c.Radius >= tile.MinY && c.Y-c.Radius <= tile.MaxY
 }
 
+// segmentIntersectsRect reports whether the segment from (x1,y1) to (x2,y2)
+// intersects rect, via Liang-Barsky clipping.
+func segmentIntersectsRect(x1, y1, x2, y2 float32, rect tileBounds) bool {
+	dx, dy := x2-x1, y2-y1
+	tMin, tMax := float32(0), float32(1)
+
+	clip := func(p, q float32) bool {
+		if p == 0 {
+			return q >= 0 // parallel to this axis: reject if outside on that side
+		}
+		t := q / p
+		if p < 0 {
+			if t > tMax {
+				return false
+			}
+			if t > tMin {
+				tMin = t
+			}
+		} else {
+			if t < tMin {
+				return false
+			}
+			if t < tMax {
+				tMax = t
+			}
+		}
+		return true
+	}
+
+	return clip(-dx, x1-rect.MinX) &&
+		clip(dx, rect.MaxX-x1) &&
+		clip(-dy, y1-rect.MinY) &&
+		clip(dy, rect.MaxY-y1)
+}
+
 // filterGroupsForTile returns the subset of groups/circles/bridges that
 // overlap tile, along with the aggregate main/other counts (mirroring
 // ConfigForGroups' semantics: main = largest single group, other = sum of
-// all groups) used to pick a shader tier.
+// all groups) used to pick a shader tier. Circles and bridges are each
+// padded individually (by radius, resp. bridge thickness) rather than
+// padding tile itself.
 func filterGroupsForTile(groups []Group, tile tileBounds) (filtered []Group, mainCircles, mainBridges, otherCircles, otherBridges int) {
 	for _, g := range groups {
 		fg, ok := filterGroup(g, tile)
@@ -286,9 +316,10 @@ func filterGroupsForTile(groups []Group, tile tileBounds) (filtered []Group, mai
 	return filtered, mainCircles, mainBridges, otherCircles, otherBridges
 }
 
-// filterGroup filters g's circles down to those overlapping tile plus any
-// circle that is the far end of a bridge from an included circle (even if
-// off-tile, otherwise the bridge would pop in/out at tile borders),
+// filterGroup filters g's circles down to those overlapping tile (padded by
+// each circle's own radius) plus the endpoints of any bridge whose segment
+// crosses tile (padded by the group's largest bridge radius, since a
+// bridge's rendered shape bulges by up to that much off its segment),
 // remapping bridge endpoints accordingly. ok is false when no circles
 // survive.
 func filterGroup(g Group, tile tileBounds) (Group, bool) {
@@ -301,20 +332,25 @@ func filterGroup(g Group, tile tileBounds) (Group, bool) {
 		}
 	}
 
-	if !found {
-		return Group{}, false
+	var maxBridgeRadius float32
+	for _, b := range g.Bridges {
+		if b.MiddleRadius > maxBridgeRadius {
+			maxBridgeRadius = b.MiddleRadius
+		}
+	}
+	bridgeTile := tile.padded(maxBridgeRadius)
+
+	for _, b := range g.Bridges {
+		a, c := g.Circles[b.A], g.Circles[b.B]
+		if segmentIntersectsRect(a.X, a.Y, c.X, c.Y, bridgeTile) {
+			included[b.A] = true
+			included[b.B] = true
+			found = true
+		}
 	}
 
-	// Propagate inclusion across bridge chains until it stops spreading.
-	for changed := true; changed; {
-		changed = false
-		for _, b := range g.Bridges {
-			if included[b.A] != included[b.B] {
-				included[b.A] = true
-				included[b.B] = true
-				changed = true
-			}
-		}
+	if !found {
+		return Group{}, false
 	}
 
 	remap := make([]int, len(g.Circles))
