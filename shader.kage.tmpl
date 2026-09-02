@@ -36,12 +36,13 @@ func smin(a, b, k float) float {
 	return mix(b, a, h) - k*h*(1.0-h)
 }
 {{if .EdgeShadingEnabled}}
-// xy = surface gradient, z = distance
-func sminField(a, b vec3, k float) vec3 {
+// xy = surface gradient, z = distance, w = distance from center/axis
+func sminField(a, b vec4, k float) vec4 {
 	h := clamp(0.5+0.5*(b.z-a.z)/k, 0.0, 1.0)
 	dist := mix(b.z, a.z, h) - k*h*(1.0-h)
 	grad := mix(b.xy, a.xy, h)
-	return vec3(grad, dist)
+	rawDist := mix(b.w, a.w, h)
+	return vec4(grad, dist, rawDist)
 }
 {{end}}
 func sdCircleDistance(p vec2, circle vec4) float {
@@ -49,10 +50,11 @@ func sdCircleDistance(p vec2, circle vec4) float {
 	return length(d) - circle.z
 }
 {{if .EdgeShadingEnabled}}
-func sdCircleField(p vec2, circle vec4) vec3 {
+func sdCircleField(p vec2, circle vec4) vec4 {
 	d := p - circle.xy
 	grad := d * inversesqrt(max(dot(d, d), 1e-12))
-	return vec3(grad, length(d)-circle.z)
+	rawDist := length(d)
+	return vec4(grad, rawDist-circle.z, rawDist)
 }
 {{end}}
 {{if .NeedsCapsuleDistance}}
@@ -94,7 +96,7 @@ func sdSplineCapsuleField(
 	r1 float,
 	r2 float,
 	r3 float,
-) vec3 {
+) vec4 {
 	ba := b - a
 	pa := p - a
 
@@ -123,14 +125,17 @@ func sdSplineCapsuleField(
 	invQ := inversesqrt(max(q2, 1e-12))
 
 	grad := q*invQ - drdt*ba*invBa2
+	rawDist := q2 * invQ
 
-	return vec3(grad, q2*invQ-radius)
+	return vec4(grad, rawDist-radius, rawDist)
 }
 {{end}}
 {{if .EdgeShadingEnabled}}
-func edge(dist float, normal vec2) float {
+func edge(dist float, normal vec2, radius float) float {
 	lightDir := {{vec2 .LightDirX .LightDirY}}
-	invEdgeThickness := 1.0 / -EdgeThickness
+	// Clamp the edge band to the feature's own size so tiny circles/narrow bridges don't shade past their own center.
+	thickness := min(EdgeThickness, max(radius, 1e-4))
+	invEdgeThickness := 1.0 / -thickness
 	u := clamp(dist*invEdgeThickness, 0.0, 1.0)
 	factor := 1.0 - u*(2.0-u)
 	return mix(0.75, 1.0, factor*dot(normal, lightDir))
@@ -146,7 +151,7 @@ func Fragment(dstPos vec4) vec4 {
 	// Main visible field
 	// ------------------------------------------------------------
 {{if .EdgeShadingEnabled}}
-	mainField := vec3(0.0, 0.0, big)
+	mainField := vec4(0.0, 0.0, big, big)
 
 	for i := 0; i < MaxMainCircles; i++ {
 		// Kage loop bounds must be constant; the real count is enforced with break.
@@ -278,7 +283,8 @@ func Fragment(dstPos vec4) vec4 {
 	}
 {{if .EdgeShadingEnabled}}
 	normal := mainField.xy * inversesqrt(max(dot(mainField.xy, mainField.xy), 1e-12))
-	factor := edge(squeezedDist, normal)
+	radius := mainField.w - mainField.z
+	factor := edge(squeezedDist, normal, radius)
 	return vec4(MainColor.rgb*factor, MainColor.a)
 {{else}}
 	return MainColor

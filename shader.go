@@ -210,7 +210,7 @@ func packBridges(circles []Circle, bridges []Bridge, max int) (ends, radii []flo
 		b := circles[br.B]
 
 		ends[i*4], ends[i*4+1], ends[i*4+2], ends[i*4+3] = a.X, a.Y, b.X, b.Y
-		radii[i*3], radii[i*3+1], radii[i*3+2] = a.Radius, br.MiddleRadius, b.Radius
+		radii[i*3], radii[i*3+1], radii[i*3+2] = a.Radius/2, br.MiddleRadius, b.Radius/2
 	}
 
 	return ends, radii, nil
