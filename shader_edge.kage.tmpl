@@ -46,11 +46,6 @@ func sminField(a, b vec4, k float) vec4 {
 	return vec4(grad, dist, radius)
 }
 
-func sdCircleDistance(p vec2, circle vec4) float {
-	d := p - circle.xy
-	return length(d) - circle.z
-}
-
 func sdCircleField(p vec2, circle vec4) vec4 {
 	d := p - circle.xy
 	d2 := dot(d, d)
@@ -60,39 +55,7 @@ func sdCircleField(p vec2, circle vec4) vec4 {
 	return vec4(grad, rawDist-circle.z, circle.z)
 }
 
-{{if gt .OtherBridges 0}}
-func sdSplineCapsuleDistance(
-	p vec2,
-	a vec2,
-	b vec2,
-	r1 float,
-	r2 float,
-	r3 float,
-) float {
-	ba := b - a
-	pa := p - a
-
-	ba2 := max(dot(ba, ba), 1e-12)
-	t := clamp(dot(pa, ba)/ba2, 0.0, 1.0)
-
-	q := pa - ba*t
-
-	// First/second half of spline.
-	side := step(0.5, t)
-	x := 2.0*t - side
-
-	ra := mix(r1, r2, side)
-	rb := mix(r2, r3, side)
-
-	// smoothstep interpolation.
-	s := x*x*(3.0-2.0*x)
-	radius := mix(ra, rb, s)
-
-	return length(q) - radius
-}
-{{end}}
-
-{{if gt .MainBridges 0}}
+{{if or (gt .MainBridges 0) (gt .OtherBridges 0)}}
 func sdSplineCapsuleField(
 	p vec2,
 	a vec2,
@@ -206,29 +169,31 @@ func Fragment(dstPos vec4) vec4 {
 		)
 	}
 	{{end}}
-	mainDist := mainField.z
 
 {{if and (eq .OtherCircles 0) (eq .OtherBridges 0)}}
-	squeezedDist := mainDist
+	squeezedDist := mainField.z
+	squeezedGrad := mainField.xy
 {{else}}
 	// ------------------------------------------------------------
 	// Combined invisible "everything else" field
 	// ------------------------------------------------------------
 
-	otherDist := big
+	otherField := vec4(0.0, 0.0, big, big)
+
 	{{if gt .OtherCircles 0}}
 	for i := 0; i < MaxOtherCircles; i++ {
 		if i >= OtherCircleCount {
 			break
 		}
 
-		otherDist = smin(
-			otherDist,
-			sdCircleDistance(uv, OtherCircles[i]),
+		otherField = sminField(
+			otherField,
+			sdCircleField(uv, OtherCircles[i]),
 			k,
 		)
 	}
 	{{end}}
+
 	{{if gt .OtherBridges 0}}
 	for i := 0; i < MaxOtherBridges; i++ {
 		if i >= OtherBridgeCount {
@@ -238,9 +203,9 @@ func Fragment(dstPos vec4) vec4 {
 		end := OtherBridgeEnds[i]
 		radius := OtherBridgeRadii[i]
 
-		otherDist = smin(
-			otherDist,
-			sdSplineCapsuleDistance(
+		otherField = sminField(
+			otherField,
+			sdSplineCapsuleField(
 				uv,
 				end.xy,
 				end.zw,
@@ -256,13 +221,19 @@ func Fragment(dstPos vec4) vec4 {
 	// ------------------------------------------------------------
 	// Squeezing
 	// ------------------------------------------------------------
-	squeezedDist := mainDist - smin(otherDist, 0.0, k*0.5)
+	squeezeField := sminField(
+		otherField,
+		vec4(0.0, 0.0, 0.0, 0.0),
+		k*0.5,
+	)
+	squeezedDist := mainField.z - squeezeField.z
+	squeezedGrad := mainField.xy - squeezeField.xy
 {{end}}
 
 	if squeezedDist >= 0.0 {
 		discard()
 	}
 
-	factor := edge(squeezedDist, mainField.xy, mainField.w)
+	factor := edge(squeezedDist, squeezedGrad, mainField.w)
 	return vec4(MainColor.rgb*factor, MainColor.a)
 }
