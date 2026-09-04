@@ -2,19 +2,15 @@
 
 package main
 
-const MaxMainCircles = {{.MainCircles}}
-{{if gt .MainBridges 0}}const MaxMainBridges = {{.MainBridges}}
-{{end -}}
-{{if gt .OtherCircles 0}}const MaxOtherCircles = {{.OtherCircles}}
-{{end -}}
-{{if gt .OtherBridges 0}}const MaxOtherBridges = {{.OtherBridges}}
-{{end -}}
 const SmoothK = {{float .SmoothK}}
-{{if .EdgeShadingEnabled}}const EdgeThickness = {{float .EdgeThickness}}
-{{end}}
+const MaxMainCircles = {{.MainCircles}}
+{{if gt .MainBridges 0}}const MaxMainBridges = {{.MainBridges}}{{end}}
+{{if gt .OtherCircles 0}}const MaxOtherCircles = {{.OtherCircles}}{{end}}
+{{if gt .OtherBridges 0}}const MaxOtherBridges = {{.OtherBridges}}{{end}}
+const EdgeThickness = {{float .EdgeThickness}}
+
 var Resolution vec2
 var MainColor vec4
-
 var MainCircleCount int
 var MainCircles [MaxMainCircles]vec4
 {{if gt .MainBridges 0}}
@@ -31,33 +27,40 @@ var OtherBridgeCount int
 var OtherBridgeEnds [MaxOtherBridges]vec4
 var OtherBridgeRadii [MaxOtherBridges]vec3
 {{end}}
+
 func smin(a, b, k float) float {
 	h := clamp(0.5+0.5*(b-a)/k, 0.0, 1.0)
 	return mix(b, a, h) - k*h*(1.0-h)
 }
-{{if .EdgeShadingEnabled}}
+
 // xy = surface gradient, z = distance, w = distance from center/axis
 func sminField(a, b vec4, k float) vec4 {
 	h := clamp(0.5+0.5*(b.z-a.z)/k, 0.0, 1.0)
+
 	dist := mix(b.z, a.z, h) - k*h*(1.0-h)
 	grad := mix(b.xy, a.xy, h)
-	rawDist := mix(b.w, a.w, h)
-	return vec4(grad, dist, rawDist)
+
+	// Interpolate actual feature radius.
+	radius := mix(b.w, a.w, h)
+
+	return vec4(grad, dist, radius)
 }
-{{end}}
+
 func sdCircleDistance(p vec2, circle vec4) float {
 	d := p - circle.xy
 	return length(d) - circle.z
 }
-{{if .EdgeShadingEnabled}}
+
 func sdCircleField(p vec2, circle vec4) vec4 {
 	d := p - circle.xy
-	grad := d * inversesqrt(max(dot(d, d), 1e-12))
-	rawDist := length(d)
-	return vec4(grad, rawDist-circle.z, rawDist)
+	d2 := dot(d, d)
+	rawDist := sqrt(d2)
+	grad := d * inversesqrt(max(d2, 1e-12))
+	// w = feature radius
+	return vec4(grad, rawDist-circle.z, circle.z)
 }
-{{end}}
-{{if .NeedsCapsuleDistance}}
+
+{{if gt .OtherBridges 0}}
 func sdSplineCapsuleDistance(
 	p vec2,
 	a vec2,
@@ -88,7 +91,8 @@ func sdSplineCapsuleDistance(
 	return length(q) - radius
 }
 {{end}}
-{{if .NeedsCapsuleField}}
+
+{{if gt .MainBridges 0}}
 func sdSplineCapsuleField(
 	p vec2,
 	a vec2,
@@ -127,20 +131,35 @@ func sdSplineCapsuleField(
 	grad := q*invQ - drdt*ba*invBa2
 	rawDist := q2 * invQ
 
-	return vec4(grad, rawDist-radius, rawDist)
+	return vec4(grad, rawDist-radius, radius)
 }
 {{end}}
-{{if .EdgeShadingEnabled}}
-func edge(dist float, normal vec2, radius float) float {
+
+func edge(dist float, grad vec2, radius float) float {
 	lightDir := {{vec2 .LightDirX .LightDirY}}
-	// Clamp the edge band to the feature's own size so tiny circles/narrow bridges don't shade past their own center.
+
 	thickness := min(EdgeThickness, max(radius, 1e-4))
-	invEdgeThickness := 1.0 / -thickness
-	u := clamp(dist*invEdgeThickness, 0.0, 1.0)
-	factor := 1.0 - u*(2.0-u)
-	return mix(0.75, 1.0, factor*dot(normal, lightDir))
+
+	grad2 := dot(grad, grad)
+	gradLen := sqrt(grad2)
+
+	// Polynomial smin isn't a true SDF in the blend region.
+	dist /= max(gradLen, 0.25)
+
+	u := clamp(dist/-thickness, 0.0, 1.0)
+	edgeAmount := 1.0 - u*(2.0-u)
+
+	normal := grad * inversesqrt(max(grad2, 1e-12))
+
+	// At the medial axis, opposing primitive gradients cancel.
+	// Directional lighting there has no meaningful normal.
+	normalStrength := smoothstep(0.15, 0.5, gradLen)
+
+	lighting := dot(normal, lightDir) * normalStrength
+
+	return mix(0.75, 1.0, edgeAmount*lighting)
 }
-{{end}}
+
 func Fragment(dstPos vec4) vec4 {
 	uv := dstPos.xy / Resolution
 
@@ -150,7 +169,6 @@ func Fragment(dstPos vec4) vec4 {
 	// ------------------------------------------------------------
 	// Main visible field
 	// ------------------------------------------------------------
-{{if .EdgeShadingEnabled}}
 	mainField := vec4(0.0, 0.0, big, big)
 
 	for i := 0; i < MaxMainCircles; i++ {
@@ -165,7 +183,7 @@ func Fragment(dstPos vec4) vec4 {
 			k,
 		)
 	}
-{{if gt .MainBridges 0}}
+	{{if gt .MainBridges 0}}
 	for i := 0; i < MaxMainBridges; i++ {
 		if i >= MainBridgeCount {
 			break
@@ -187,54 +205,18 @@ func Fragment(dstPos vec4) vec4 {
 			k,
 		)
 	}
-{{end}}
+	{{end}}
 	mainDist := mainField.z
+
+{{if and (eq .OtherCircles 0) (eq .OtherBridges 0)}}
+	squeezedDist := mainDist
 {{else}}
-	mainDist := big
-
-	for i := 0; i < MaxMainCircles; i++ {
-		// Kage loop bounds must be constant; the real count is enforced with break.
-		if i >= MainCircleCount {
-			break
-		}
-
-		mainDist = smin(
-			mainDist,
-			sdCircleDistance(uv, MainCircles[i]),
-			k,
-		)
-	}
-{{if gt .MainBridges 0}}
-	for i := 0; i < MaxMainBridges; i++ {
-		if i >= MainBridgeCount {
-			break
-		}
-
-		end := MainBridgeEnds[i]
-		radius := MainBridgeRadii[i]
-
-		mainDist = smin(
-			mainDist,
-			sdSplineCapsuleDistance(
-				uv,
-				end.xy,
-				end.zw,
-				radius.x,
-				radius.y,
-				radius.z,
-			),
-			k,
-		)
-	}
-{{end}}
-{{end}}
-{{if or (gt .OtherCircles 0) (gt .OtherBridges 0)}}
 	// ------------------------------------------------------------
 	// Combined invisible "everything else" field
 	// ------------------------------------------------------------
 
 	otherDist := big
-{{if gt .OtherCircles 0}}
+	{{if gt .OtherCircles 0}}
 	for i := 0; i < MaxOtherCircles; i++ {
 		if i >= OtherCircleCount {
 			break
@@ -246,8 +228,8 @@ func Fragment(dstPos vec4) vec4 {
 			k,
 		)
 	}
-{{end}}
-{{if gt .OtherBridges 0}}
+	{{end}}
+	{{if gt .OtherBridges 0}}
 	for i := 0; i < MaxOtherBridges; i++ {
 		if i >= OtherBridgeCount {
 			break
@@ -269,24 +251,18 @@ func Fragment(dstPos vec4) vec4 {
 			k,
 		)
 	}
-{{end}}
+	{{end}}
+
 	// ------------------------------------------------------------
 	// Squeezing
 	// ------------------------------------------------------------
-
 	squeezedDist := mainDist - smin(otherDist, 0.0, k*0.5)
-{{else}}
-	squeezedDist := mainDist
 {{end}}
+
 	if squeezedDist >= 0.0 {
 		discard()
 	}
-{{if .EdgeShadingEnabled}}
-	normal := mainField.xy * inversesqrt(max(dot(mainField.xy, mainField.xy), 1e-12))
-	radius := mainField.w - mainField.z
-	factor := edge(squeezedDist, normal, radius)
+
+	factor := edge(squeezedDist, mainField.xy, mainField.w)
 	return vec4(MainColor.rgb*factor, MainColor.a)
-{{else}}
-	return MainColor
-{{end}}
 }

@@ -2,7 +2,7 @@ package metaballs
 
 import (
 	"bytes"
-	_ "embed"
+	"embed"
 	"fmt"
 	"math"
 	"strconv"
@@ -12,13 +12,18 @@ import (
 	"github.com/hajimehoshi/ebiten/v2"
 )
 
-//go:embed shader.kage.tmpl
-var kageSource string
+//go:embed *.kage.tmpl
+var kageFS embed.FS
 
-var kageTemplate = template.Must(template.New("shader").Funcs(template.FuncMap{
+var kageTemplates = template.Must(template.New("").Funcs(template.FuncMap{
 	"float": formatKageFloat,
 	"vec2":  formatKageVec2,
-}).Parse(kageSource))
+}).ParseFS(kageFS, "*.kage.tmpl"))
+
+const (
+	basicShaderTemplate = "shader_basic.kage.tmpl"
+	edgeShaderTemplate  = "shader_edge.kage.tmpl"
+)
 
 // formatKageFloat renders f as a Kage float literal, which requires a decimal point.
 func formatKageFloat(f float32) string {
@@ -46,14 +51,6 @@ type ShaderConfig struct {
 	LightDirX     float32
 	LightDirY     float32
 	EdgeThickness float32
-}
-
-// shaderTemplateData augments ShaderConfig with values derived for code generation.
-type shaderTemplateData struct {
-	ShaderConfig
-	EdgeShadingEnabled   bool
-	NeedsCapsuleField    bool
-	NeedsCapsuleDistance bool
 }
 
 type Circle struct {
@@ -151,10 +148,11 @@ func NewMetaballShader(config ShaderConfig) (*MetaballShader, error) {
 		return nil, fmt.Errorf("invalid shader config: %+v", config)
 	}
 
-	data := shaderTemplateData{ShaderConfig: config}
+	edgeShadingEnabled := false
+	data := config
 
 	if length := math.Hypot(float64(config.LightDirX), float64(config.LightDirY)); length > 0 {
-		data.EdgeShadingEnabled = true
+		edgeShadingEnabled = true
 		data.LightDirX = float32(float64(config.LightDirX) / length)
 		data.LightDirY = float32(float64(config.LightDirY) / length)
 
@@ -163,11 +161,13 @@ func NewMetaballShader(config ShaderConfig) (*MetaballShader, error) {
 		}
 	}
 
-	data.NeedsCapsuleField = data.EdgeShadingEnabled && config.MainBridges > 0
-	data.NeedsCapsuleDistance = config.OtherBridges > 0 || (!data.EdgeShadingEnabled && config.MainBridges > 0)
+	templateName := basicShaderTemplate
+	if edgeShadingEnabled {
+		templateName = edgeShaderTemplate
+	}
 
 	var src bytes.Buffer
-	if err := kageTemplate.Execute(&src, data); err != nil {
+	if err := kageTemplates.ExecuteTemplate(&src, templateName, data); err != nil {
 		return nil, fmt.Errorf("generate metaball shader source: %w", err)
 	}
 
