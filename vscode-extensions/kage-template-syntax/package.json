@@ -1,0 +1,38 @@
+{
+  "name": "kage-template-syntax",
+  "displayName": "Kage Template Syntax",
+  "description": "Syntax highlighting for .kage.tmpl files: Kage/Go code with Go text/template expressions.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "kage-template",
+        "aliases": [
+          "Kage Template",
+          "kage-template"
+        ],
+        "extensions": [
+          ".kage.tmpl"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "kage-template",
+        "scopeName": "source.kage-template",
+        "path": "./syntaxes/kage-template.tmLanguage.json",
+        "embeddedLanguages": {
+          "meta.embedded.block.go": "go"
+        }
+      }
+    ]
+  }
+}

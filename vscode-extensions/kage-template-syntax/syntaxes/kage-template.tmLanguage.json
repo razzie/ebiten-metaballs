@@ -1,0 +1,112 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Kage Template",
+  "scopeName": "source.kage-template",
+  "patterns": [
+    {
+      "include": "#template"
+    },
+    {
+      "include": "source.go"
+    }
+  ],
+  "repository": {
+    "template": {
+      "patterns": [
+        {
+          "name": "meta.template.go",
+          "begin": "\\{\\{-?",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.template.begin.go"
+            }
+          },
+          "end": "-?\\}\\}",
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.template.end.go"
+            }
+          },
+          "patterns": [
+            {
+              "match": "\\b(if|else|end|range|with|template|block|define|break|continue)\\b",
+              "name": "keyword.control.template.go"
+            },
+            {
+              "match": "\\$[A-Za-z_][A-Za-z0-9_]*",
+              "name": "variable.other.template.go"
+            },
+            {
+              "match": "\\.[A-Za-z_][A-Za-z0-9_]*",
+              "name": "variable.other.member.template.go"
+            },
+            {
+              "match": "\\b(true|false|nil)\\b",
+              "name": "constant.language.template.go"
+            },
+            {
+              "match": "\\b(eq|ne|lt|le|gt|ge|and|or|not|len|index|slice|print|printf|println|html|js|urlquery|call)\\b",
+              "name": "support.function.template.go"
+            },
+            {
+              "begin": "\"",
+              "beginCaptures": {
+                "0": {
+                  "name": "punctuation.definition.string.begin.go"
+                }
+              },
+              "end": "\"",
+              "endCaptures": {
+                "0": {
+                  "name": "punctuation.definition.string.end.go"
+                }
+              },
+              "name": "string.quoted.double.go",
+              "patterns": [
+                {
+                  "match": "\\\\.",
+                  "name": "constant.character.escape.go"
+                }
+              ]
+            },
+            {
+              "begin": "`",
+              "beginCaptures": {
+                "0": {
+                  "name": "punctuation.definition.string.begin.go"
+                }
+              },
+              "end": "`",
+              "endCaptures": {
+                "0": {
+                  "name": "punctuation.definition.string.end.go"
+                }
+              },
+              "name": "string.quoted.raw.go"
+            },
+            {
+              "match": "\\b[0-9]+(?:\\.[0-9]+)?\\b",
+              "name": "constant.numeric.template.go"
+            },
+            {
+              "match": "\\|",
+              "name": "keyword.operator.pipeline.template.go"
+            },
+            {
+              "match": ":=",
+              "name": "keyword.operator.assignment.template.go"
+            },
+            {
+              "match": "[(),]",
+              "name": "punctuation.separator.template.go"
+            },
+            {
+              "match": "[A-Za-z_][A-Za-z0-9_]*",
+              "name": "support.function.template.go"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
