@@ -8,7 +8,7 @@ const MaxMainCircles = {{.MainCircles}}
 {{if gt .OtherCircles 0}}const MaxOtherCircles = {{.OtherCircles}}{{end}}
 {{if gt .OtherBridges 0}}const MaxOtherBridges = {{.OtherBridges}}{{end}}
 
-var Resolution vec2
+var UvScale vec2
 var MainColor vec4
 var MainCircleCount int
 var MainCircles [MaxMainCircles]vec4
@@ -70,7 +70,7 @@ func sdSplineCapsuleDistance(
 {{end}}
 
 func Fragment(dstPos vec4) vec4 {
-	uv := dstPos.xy / Resolution
+	uv := dstPos.xy * UvScale
 
 	k := SmoothK
 	big := 100.0

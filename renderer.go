@@ -19,16 +19,18 @@ type RendererConfig struct {
 	// same SmoothK, LightDirX, LightDirY and EdgeThickness.
 	Tiers []ShaderConfig
 
-	// RootCols/RootRows define the initial coarse grid over the [0,1]x[0,1]
-	// uv space, before any adaptive subdivision.
+	// RootCols/RootRows define the initial coarse grid over the visible uv
+	// domain (derived per Draw from dst's size multiplied by the uv scale),
+	// before any adaptive subdivision.
 	RootCols, RootRows int
 
 	// MaxDepth is the maximum number of adaptive subdivisions below the root
 	// grid.
 	MaxDepth int
 
-	// MinTileSize is the smallest uv-space tile width/height allowed;
-	// subdivision stops once a child tile would drop below it.
+	// MinTileSize is the smallest uv-space tile width/height allowed in the
+	// visible uv domain; subdivision stops once a child tile would drop below
+	// it.
 	MinTileSize float32
 
 	// Debug, when true, overlays every tile visited (skipped, subdivided, or
@@ -117,7 +119,7 @@ func NewRenderer(cfg RendererConfig) (*Renderer, error) {
 	}, nil
 }
 
-// tileBounds is a uv-space rectangle within [0,1]x[0,1].
+// tileBounds is a uv-space rectangle within the visible uv domain.
 type tileBounds struct {
 	MinX, MinY, MaxX, MaxY float32
 }
@@ -143,8 +145,31 @@ type Stats struct {
 }
 
 // Draw renders groups by planning a tile grid over dst and drawing only the
-// tiles that contain circles, subdividing crowded tiles as needed.
+// tiles that contain circles, subdividing crowded tiles as needed. The uv
+// space is normalized against dst's own size (uv scale = 1/size), i.e. the
+// canvas covers [0,1]x[0,1] in uv space; on non-square canvases circles
+// stretch with the aspect ratio - use DrawScaled to avoid that.
 func (r *Renderer) Draw(dst *ebiten.Image, groups []Group) (Stats, error) {
+	w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
+	return r.DrawScaled(dst, groups, [2]float32{1 / float32(w), 1 / float32(h)})
+}
+
+// DrawScaled is like Draw, but with an explicit uv scale (uv units per
+// pixel) instead of dst's own reciprocal size. The visible uv domain becomes
+// [0, width*scaleX] x [0, height*scaleY] and the tile grid is planned over
+// it. A uniform scale keeps circles circular regardless of aspect ratio:
+// e.g. {1/h, 1/h} maps the canvas to [0, w/h]x[0, 1] in uv space. Both scale
+// components must be positive.
+func (r *Renderer) DrawScaled(dst *ebiten.Image, groups []Group, uvScale [2]float32) (Stats, error) {
+	if uvScale[0] <= 0 || uvScale[1] <= 0 {
+		return Stats{}, fmt.Errorf("renderer: uv scale must be positive: %v", uvScale)
+	}
+
+	xform := uvTransform{
+		scale:    uvScale,
+		invScale: [2]float32{1 / uvScale[0], 1 / uvScale[1]},
+	}
+
 	maxCircles, maxBridges := 0, 0
 	for i := range groups {
 		maxCircles = max(maxCircles, len(groups[i].Circles))
@@ -157,10 +182,13 @@ func (r *Renderer) Draw(dst *ebiten.Image, groups []Group) (Stats, error) {
 	r.pools.ensure(len(groups), maxCircles, maxBridges)
 
 	w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
-	resolution := [2]float32{float32(w), float32(h)}
 
-	dw := 1.0 / float32(r.cfg.RootCols)
-	dh := 1.0 / float32(r.cfg.RootRows)
+	// The visible uv domain covered by dst.
+	domainW := float32(w) * uvScale[0]
+	domainH := float32(h) * uvScale[1]
+
+	dw := domainW / float32(r.cfg.RootCols)
+	dh := domainH / float32(r.cfg.RootRows)
 
 	rootTile := func(idx int) tileBounds {
 		col := idx % r.cfg.RootCols
@@ -178,14 +206,21 @@ func (r *Renderer) Draw(dst *ebiten.Image, groups []Group) (Stats, error) {
 	if r.cfg.Workers <= 1 {
 		var stats Stats
 		for idx := 0; idx < total; idx++ {
-			if err := r.drawTile(dst, resolution, groups, rootTile(idx), 0, &stats); err != nil {
+			if err := r.drawTile(dst, xform, groups, rootTile(idx), 0, &stats); err != nil {
 				return stats, err
 			}
 		}
 		return stats, nil
 	}
 
-	return r.drawParallel(dst, resolution, groups, rootTile, total)
+	return r.drawParallel(dst, xform, groups, rootTile, total)
+}
+
+// uvTransform holds the uv scale (uv units per pixel) and its inverse
+// (pixels per uv unit), the latter precomputed once per Draw so that
+// uv-to-pixel conversions stay multiplications.
+type uvTransform struct {
+	scale, invScale [2]float32
 }
 
 type tileDrawTask struct {
@@ -205,7 +240,7 @@ type tileDrawTask struct {
 // goroutine to execute all Ebiten draw calls.
 func (r *Renderer) drawParallel(
 	dst *ebiten.Image,
-	resolution [2]float32,
+	xform uvTransform,
 	groups []Group,
 	rootTile func(int) tileBounds,
 	total int,
@@ -235,7 +270,7 @@ func (r *Renderer) drawParallel(
 					break
 				}
 
-				r.processTileParallel(resolution, groups, rootTile(idx), 0, taskChan, &localSkipped)
+				r.processTileParallel(xform, groups, rootTile(idx), 0, taskChan, &localSkipped)
 			}
 
 			tilesSkipped.Add(int64(localSkipped))
@@ -259,7 +294,7 @@ func (r *Renderer) drawParallel(
 				firstErr = fmt.Errorf("renderer: SubImage did not return *ebiten.Image")
 			} else {
 				origin := [2]float32{float32(task.pixelRect.Min.X), float32(task.pixelRect.Min.Y)}
-				if err := r.shaders[task.tierIdx].DrawRegionAt(sub, task.filtered, resolution, origin); err != nil {
+				if err := r.shaders[task.tierIdx].DrawScaledAt(sub, task.filtered, xform.scale, origin); err != nil {
 					firstErr = err
 				} else {
 					stats.TilesDrawn++
@@ -269,7 +304,7 @@ func (r *Renderer) drawParallel(
 		}
 
 		if task.hasDebug && firstErr == nil {
-			r.drawDebugOutline(dst, resolution, task.tile)
+			r.drawDebugOutline(dst, xform, task.tile)
 		}
 
 		if task.release != nil {
@@ -282,7 +317,7 @@ func (r *Renderer) drawParallel(
 }
 
 func (r *Renderer) processTileParallel(
-	resolution [2]float32,
+	xform uvTransform,
 	groups []Group,
 	tile tileBounds,
 	depth int,
@@ -316,7 +351,7 @@ func (r *Renderer) processTileParallel(
 			}
 
 			for _, child := range children {
-				r.processTileParallel(resolution, groups, child, depth+1, taskChan, tilesSkipped)
+				r.processTileParallel(xform, groups, child, depth+1, taskChan, tilesSkipped)
 			}
 
 			if r.cfg.Debug {
@@ -338,7 +373,7 @@ func (r *Renderer) processTileParallel(
 		clipped = clipGroupsToTier(filtered, r.cfg.Tiers[tierIdx])
 	}
 
-	pixelRect := tileToPixelRect(tile, resolution)
+	pixelRect := tileToPixelRect(tile, xform.invScale)
 	if pixelRect.Dx() <= 0 || pixelRect.Dy() <= 0 {
 		release()
 		if r.cfg.Debug {
@@ -361,7 +396,7 @@ func (r *Renderer) processTileParallel(
 
 func (r *Renderer) drawTile(
 	dst *ebiten.Image,
-	resolution [2]float32,
+	xform uvTransform,
 	groups []Group,
 	tile tileBounds,
 	depth int,
@@ -380,7 +415,7 @@ func (r *Renderer) drawTile(
 
 	if r.cfg.Debug {
 		// Deferred so it draws last, on top of this tile's content and any children's.
-		defer r.drawDebugOutline(dst, resolution, tile)
+		defer r.drawDebugOutline(dst, xform, tile)
 	}
 
 	tierIdx := r.pickTier(mainCircles, mainBridges, otherCircles, otherBridges)
@@ -402,7 +437,7 @@ func (r *Renderer) drawTile(
 			}
 
 			for _, child := range children {
-				if err := r.drawTile(dst, resolution, groups, child, depth+1, stats); err != nil {
+				if err := r.drawTile(dst, xform, groups, child, depth+1, stats); err != nil {
 					return err
 				}
 			}
@@ -425,7 +460,7 @@ func (r *Renderer) drawTile(
 		stats.CirclesClipped += clipped
 	}
 
-	pixelRect := tileToPixelRect(tile, resolution)
+	pixelRect := tileToPixelRect(tile, xform.invScale)
 	if pixelRect.Dx() <= 0 || pixelRect.Dy() <= 0 {
 		return nil
 	}
@@ -436,7 +471,7 @@ func (r *Renderer) drawTile(
 	}
 
 	origin := [2]float32{float32(pixelRect.Min.X), float32(pixelRect.Min.Y)}
-	if err := r.shaders[tierIdx].DrawRegionAt(sub, filtered, resolution, origin); err != nil {
+	if err := r.shaders[tierIdx].DrawScaledAt(sub, filtered, xform.scale, origin); err != nil {
 		return err
 	}
 
@@ -461,8 +496,8 @@ var (
 
 // drawDebugOutline draws a 1px outline around tile: black top/left edges,
 // white bottom/right edges, both at ~0.5 alpha.
-func (r *Renderer) drawDebugOutline(dst *ebiten.Image, resolution [2]float32, tile tileBounds) {
-	pixelRect := tileToPixelRect(tile, resolution)
+func (r *Renderer) drawDebugOutline(dst *ebiten.Image, xform uvTransform, tile tileBounds) {
+	pixelRect := tileToPixelRect(tile, xform.invScale)
 	if pixelRect.Dx() <= 0 || pixelRect.Dy() <= 0 {
 		return
 	}
@@ -476,12 +511,14 @@ func (r *Renderer) drawDebugOutline(dst *ebiten.Image, resolution [2]float32, ti
 	vector.StrokeLine(dst, maxX, minY, maxX, maxY, 1, debugBottomRightColor, false)
 }
 
-func tileToPixelRect(tile tileBounds, resolution [2]float32) image.Rectangle {
+// tileToPixelRect converts a uv-space tile to pixel coordinates; invScale
+// is the inverse uv scale (pixels per uv unit).
+func tileToPixelRect(tile tileBounds, invScale [2]float32) image.Rectangle {
 	return image.Rect(
-		int(tile.MinX*resolution[0]+0.5),
-		int(tile.MinY*resolution[1]+0.5),
-		int(tile.MaxX*resolution[0]+0.5),
-		int(tile.MaxY*resolution[1]+0.5),
+		int(tile.MinX*invScale[0]+0.5),
+		int(tile.MinY*invScale[1]+0.5),
+		int(tile.MaxX*invScale[0]+0.5),
+		int(tile.MaxY*invScale[1]+0.5),
 	)
 }
 

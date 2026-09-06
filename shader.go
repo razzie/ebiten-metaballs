@@ -218,30 +218,34 @@ func packBridges(circles []Circle, bridges []Bridge, max int) (ends, radii []flo
 
 // Draw renders each group in its own pass, using the remaining groups
 // combined as the "other" field to drive the squeezing effect. The uv space
-// is normalized against dst's own size.
+// is normalized against dst's own size (uv scale = 1/size).
 func (s *MetaballShader) Draw(dst *ebiten.Image, groups []Group) error {
 	w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
-	return s.DrawRegion(dst, groups, [2]float32{float32(w), float32(h)})
+	return s.DrawScaled(dst, groups, [2]float32{1 / float32(w), 1 / float32(h)})
 }
 
-// DrawRegion is like Draw, but normalizes uv against an explicit resolution
-// instead of dst's own size. This allows dst to be a sub-image (e.g. one
-// tile of a larger canvas) while circle coordinates stay in the full
-// canvas's uv space.
-func (s *MetaballShader) DrawRegion(dst *ebiten.Image, groups []Group, resolution [2]float32) error {
-	return s.DrawRegionAt(dst, groups, resolution, [2]float32{0, 0})
+// DrawScaled is like Draw, but with an explicit uv scale (uv units per
+// pixel) instead of dst's own reciprocal size. A uniform scale keeps circles
+// circular regardless of aspect ratio: e.g. {1/h, 1/h} maps the canvas to
+// [0, w/h]x[0, 1] in uv space. Both scale components must be positive.
+func (s *MetaballShader) DrawScaled(dst *ebiten.Image, groups []Group, uvScale [2]float32) error {
+	return s.DrawScaledAt(dst, groups, uvScale, [2]float32{0, 0})
 }
 
-// DrawRegionAt is like DrawRegion, but additionally offsets the fragment
-// position by origin before normalizing by resolution. This is required
-// when dst is a sub-image: Kage's dstPos is local to the sub-image's own
-// bounds, so origin (the sub-image's pixel offset within the full canvas)
-// must be added back to recover the full canvas's uv space.
-func (s *MetaballShader) DrawRegionAt(dst *ebiten.Image, groups []Group, resolution, origin [2]float32) error {
+// DrawScaledAt is like DrawScaled, but additionally offsets the fragment
+// position by origin before applying the uv scale. This is required when dst
+// is a sub-image: Kage's dstPos is local to the sub-image's own bounds, so
+// origin (the sub-image's pixel offset within the full canvas) must be added
+// back to recover the full canvas's uv space.
+func (s *MetaballShader) DrawScaledAt(dst *ebiten.Image, groups []Group, uvScale, origin [2]float32) error {
+	if uvScale[0] <= 0 || uvScale[1] <= 0 {
+		return fmt.Errorf("uv scale must be positive: %v", uvScale)
+	}
+
 	for i, g := range groups {
 		other := combineGroups(groups, i)
 
-		if err := s.drawPass(dst, g, other, g.Color, resolution, origin); err != nil {
+		if err := s.drawPass(dst, g, other, g.Color, uvScale, origin); err != nil {
 			return err
 		}
 	}
@@ -254,7 +258,7 @@ func (s *MetaballShader) drawPass(
 	main Group,
 	other Group,
 	color ebiten.ColorScale,
-	resolution [2]float32,
+	uvScale [2]float32,
 	origin [2]float32,
 ) error {
 	if len(main.Circles) > s.config.MainCircles ||
@@ -273,10 +277,7 @@ func (s *MetaballShader) drawPass(
 	w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
 
 	uniforms := map[string]any{
-		"Resolution": []float32{
-			resolution[0],
-			resolution[1],
-		},
+		"UvScale":   uvScale[:],
 		"MainColor": []float32{color.R(), color.G(), color.B(), color.A()},
 
 		"MainCircleCount": len(main.Circles),
