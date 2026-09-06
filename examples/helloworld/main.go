@@ -42,12 +42,6 @@ func NewGame() (*Game, error) {
 			Circles: []metaballs.Circle{
 				{X: 0.5, Y: 0.475, Radius: 0.075},
 				{X: 0.5, Y: 0.475, Radius: 0.05},
-				{X: 0.3, Y: 0.35, Radius: 0.025},
-				{X: 0.2, Y: 0.8, Radius: 0.03},
-			},
-			Bridges: []metaballs.Bridge{
-				{A: 0, B: 2, MiddleRadius: 0.005},
-				{A: 2, B: 3, MiddleRadius: 0.005},
 			},
 			Color: metaballs.NewColorScale(0, 0, 1, 1),
 		},
