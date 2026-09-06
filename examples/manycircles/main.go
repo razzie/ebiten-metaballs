@@ -23,7 +23,7 @@ const (
 	minSpeed        = 0.025
 	maxSpeed        = 0.1
 
-	smoothK       = 0.015
+	smoothK       = 0.02
 	lightDirX     = 1
 	lightDirY     = -1
 	edgeThickness = 0.015
@@ -89,18 +89,16 @@ func NewGame() (*Game, error) {
 	tiers := []metaballs.ShaderConfig{
 		{MainCircles: 16, OtherCircles: 16, SmoothK: smoothK, LightDirX: lightDirX, LightDirY: lightDirY, EdgeThickness: edgeThickness},
 		{MainCircles: 32, OtherCircles: 32, SmoothK: smoothK, LightDirX: lightDirX, LightDirY: lightDirY, EdgeThickness: edgeThickness},
-		//{MainCircles: 16, OtherCircles: 64, SmoothK: smoothK, LightDirX: lightDirX, LightDirY: lightDirY, EdgeThickness: edgeThickness},
-		//{MainCircles: 64, OtherCircles: 256, SmoothK: smoothK, LightDirX: lightDirX, LightDirY: lightDirY, EdgeThickness: edgeThickness},
-		//{MainCircles: 256, OtherCircles: 768, SmoothK: smoothK, LightDirX: lightDirX, LightDirY: lightDirY, EdgeThickness: edgeThickness},
 	}
 
 	renderer, err := metaballs.NewRenderer(metaballs.RendererConfig{
 		Tiers:       tiers,
-		RootCols:    8,
-		RootRows:    8,
+		RootCols:    1,
+		RootRows:    1,
 		MaxDepth:    3,
 		MinTileSize: 0.01,
 		Debug:       true,
+		Workers:     6,
 	})
 	if err != nil {
 		return nil, err

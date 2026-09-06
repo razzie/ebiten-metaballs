@@ -161,18 +161,16 @@ func NewGame() (*Game, error) {
 	tiers := []metaballs.ShaderConfig{
 		{MainCircles: 16, MainBridges: 8, OtherCircles: 16, OtherBridges: 8, SmoothK: smoothK, LightDirX: lightDirX, LightDirY: lightDirY, EdgeThickness: edgeThickness},
 		{MainCircles: 32, MainBridges: 16, OtherCircles: 32, OtherBridges: 16, SmoothK: smoothK, LightDirX: lightDirX, LightDirY: lightDirY, EdgeThickness: edgeThickness},
-		//{MainCircles: 16, MainBridges: 16, OtherCircles: 64, OtherBridges: 64, SmoothK: smoothK, LightDirX: lightDirX, LightDirY: lightDirY, EdgeThickness: edgeThickness},
-		//{MainCircles: 64, MainBridges: 64, OtherCircles: 256, OtherBridges: 256, SmoothK: smoothK, LightDirX: lightDirX, LightDirY: lightDirY, EdgeThickness: edgeThickness},
-		//{MainCircles: 256, MainBridges: 256, OtherCircles: 768, OtherBridges: 768, SmoothK: smoothK, LightDirX: lightDirX, LightDirY: lightDirY, EdgeThickness: edgeThickness},
 	}
 
 	renderer, err := metaballs.NewRenderer(metaballs.RendererConfig{
 		Tiers:       tiers,
-		RootCols:    8,
-		RootRows:    8,
+		RootCols:    1,
+		RootRows:    1,
 		MaxDepth:    3,
 		MinTileSize: 0.01,
 		Debug:       true,
+		Workers:     4,
 	})
 	if err != nil {
 		return nil, err
