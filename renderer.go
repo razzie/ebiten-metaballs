@@ -4,9 +4,12 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"sync"
+	"sync/atomic"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/vector"
+	"github.com/razzie/ebiten-metaballs/internal/bitset"
 )
 
 // RendererConfig configures a Renderer: a pool of shaders for different
@@ -32,14 +35,33 @@ type RendererConfig struct {
 	// drawn) with a semi-transparent outline: black top/left, white
 	// bottom/right.
 	Debug bool
+
+	// Workers controls how many goroutines split up the root grid's CPU work
+	// (probing, subdivision, and group materialization). 0 or 1 (the default)
+	// keeps Draw fully serial with no added overhead; when Workers > 1, CPU
+	// filtering work runs in parallel across worker goroutines and pushes
+	// draw tasks to a channel, while all Ebiten GPU draw calls execute
+	// sequentially on the main goroutine.
+	Workers int
+
+	// PoolMaxCircles, PoolMaxBridges and PoolMaxGroups optionally hint the
+	// initial lengths of the Renderer's scratch buffer pools (max circles
+	// per group, max bridges per group, group count). Zero leaves the
+	// default to the largest shader tier's capacities; Draw grows the pools
+	// automatically when actual input exceeds them (they never shrink).
+	PoolMaxCircles, PoolMaxBridges, PoolMaxGroups int
 }
 
 // Renderer draws large numbers of circles by tiling the canvas, skipping
 // empty tiles, adaptively subdividing crowded ones, and picking the
 // smallest shader tier that fits each tile's contents.
+//
+// Draw is not safe for concurrent use on the same Renderer (the scratch
+// pools grow between frames); use one Renderer per goroutine instead.
 type Renderer struct {
 	cfg     RendererConfig
 	shaders []*MetaballShader
+	pools   *rendererPools
 }
 
 // NewRenderer validates cfg and eagerly compiles one shader per tier.
@@ -79,7 +101,20 @@ func NewRenderer(cfg RendererConfig) (*Renderer, error) {
 		shaders[i] = shader
 	}
 
-	return &Renderer{cfg: cfg, shaders: shaders}, nil
+	// Seed pool defaults from the largest tier (tiers are sorted ascending):
+	// per-group buffers fit MainCircles/MainBridges, and the group count
+	// can't meaningfully exceed the smallest "other" capacity (larger group
+	// counts get clipped to the tier anyway). Explicit hints override.
+	largest := cfg.Tiers[len(cfg.Tiers)-1]
+	poolMaxCircles := max(cfg.PoolMaxCircles, largest.MainCircles)
+	poolMaxBridges := max(cfg.PoolMaxBridges, largest.MainBridges)
+	poolMaxGroups := max(cfg.PoolMaxGroups, min(largest.OtherCircles, largest.OtherBridges))
+
+	return &Renderer{
+		cfg:     cfg,
+		shaders: shaders,
+		pools:   newRendererPools(poolMaxGroups, poolMaxCircles, poolMaxBridges),
+	}, nil
 }
 
 // tileBounds is a uv-space rectangle within [0,1]x[0,1].
@@ -110,7 +145,16 @@ type Stats struct {
 // Draw renders groups by planning a tile grid over dst and drawing only the
 // tiles that contain circles, subdividing crowded tiles as needed.
 func (r *Renderer) Draw(dst *ebiten.Image, groups []Group) (Stats, error) {
-	var stats Stats
+	maxCircles, maxBridges := 0, 0
+	for i := range groups {
+		maxCircles = max(maxCircles, len(groups[i].Circles))
+		maxBridges = max(maxBridges, len(groups[i].Bridges))
+	}
+
+	// Grow the scratch pools (never shrinks) so every pool get below returns
+	// buffers big enough for this frame's groups, before any tile work and
+	// before drawParallel spawns its workers.
+	r.pools.ensure(len(groups), maxCircles, maxBridges)
 
 	w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
 	resolution := [2]float32{float32(w), float32(h)}
@@ -118,22 +162,201 @@ func (r *Renderer) Draw(dst *ebiten.Image, groups []Group) (Stats, error) {
 	dw := 1.0 / float32(r.cfg.RootCols)
 	dh := 1.0 / float32(r.cfg.RootRows)
 
-	for row := 0; row < r.cfg.RootRows; row++ {
-		for col := 0; col < r.cfg.RootCols; col++ {
-			tile := tileBounds{
-				MinX: float32(col) * dw,
-				MinY: float32(row) * dh,
-				MaxX: float32(col+1) * dw,
-				MaxY: float32(row+1) * dh,
-			}
-
-			if err := r.drawTile(dst, resolution, groups, tile, 0, &stats); err != nil {
-				return stats, err
-			}
+	rootTile := func(idx int) tileBounds {
+		col := idx % r.cfg.RootCols
+		row := idx / r.cfg.RootCols
+		return tileBounds{
+			MinX: float32(col) * dw,
+			MinY: float32(row) * dh,
+			MaxX: float32(col+1) * dw,
+			MaxY: float32(row+1) * dh,
 		}
 	}
 
-	return stats, nil
+	total := r.cfg.RootCols * r.cfg.RootRows
+
+	if r.cfg.Workers <= 1 {
+		var stats Stats
+		for idx := 0; idx < total; idx++ {
+			if err := r.drawTile(dst, resolution, groups, rootTile(idx), 0, &stats); err != nil {
+				return stats, err
+			}
+		}
+		return stats, nil
+	}
+
+	return r.drawParallel(dst, resolution, groups, rootTile, total)
+}
+
+type tileDrawTask struct {
+	tile           tileBounds
+	pixelRect      image.Rectangle
+	tierIdx        int
+	filtered       []Group
+	release        func()
+	circlesClipped int
+	hasDraw        bool
+	hasDebug       bool
+}
+
+// drawParallel distributes CPU filtering (probing, subdivision, group
+// materialization) across cfg.Workers goroutines. Materialized draw tasks
+// are pushed to a channel and consumed sequentially on the calling
+// goroutine to execute all Ebiten draw calls.
+func (r *Renderer) drawParallel(
+	dst *ebiten.Image,
+	resolution [2]float32,
+	groups []Group,
+	rootTile func(int) tileBounds,
+	total int,
+) (Stats, error) {
+	workers := r.cfg.Workers
+	if workers > total {
+		workers = total
+	}
+
+	var (
+		tilesSkipped atomic.Int64
+		nextIdx      atomic.Int64
+		wg           sync.WaitGroup
+	)
+
+	taskChan := make(chan tileDrawTask, workers*16)
+
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go func() {
+			defer wg.Done()
+
+			var localSkipped int
+			for {
+				idx := int(nextIdx.Add(1)) - 1
+				if idx >= total {
+					break
+				}
+
+				r.processTileParallel(resolution, groups, rootTile(idx), 0, taskChan, &localSkipped)
+			}
+
+			tilesSkipped.Add(int64(localSkipped))
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(taskChan)
+	}()
+
+	var (
+		stats    Stats
+		firstErr error
+	)
+
+	for task := range taskChan {
+		if task.hasDraw && firstErr == nil {
+			sub, ok := dst.SubImage(task.pixelRect).(*ebiten.Image)
+			if !ok {
+				firstErr = fmt.Errorf("renderer: SubImage did not return *ebiten.Image")
+			} else {
+				origin := [2]float32{float32(task.pixelRect.Min.X), float32(task.pixelRect.Min.Y)}
+				if err := r.shaders[task.tierIdx].DrawRegionAt(sub, task.filtered, resolution, origin); err != nil {
+					firstErr = err
+				} else {
+					stats.TilesDrawn++
+					stats.CirclesClipped += task.circlesClipped
+				}
+			}
+		}
+
+		if task.hasDebug && firstErr == nil {
+			r.drawDebugOutline(dst, resolution, task.tile)
+		}
+
+		if task.release != nil {
+			task.release()
+		}
+	}
+
+	stats.TilesSkipped = int(tilesSkipped.Load())
+	return stats, firstErr
+}
+
+func (r *Renderer) processTileParallel(
+	resolution [2]float32,
+	groups []Group,
+	tile tileBounds,
+	depth int,
+	taskChan chan<- tileDrawTask,
+	tilesSkipped *int,
+) {
+	prep, any, mainCircles, mainBridges, otherCircles, otherBridges, prepRelease := prepareGroupsForTile(r.pools, groups, tile)
+
+	if !any {
+		prepRelease()
+		*tilesSkipped++
+		return
+	}
+
+	tierIdx := r.pickTier(mainCircles, mainBridges, otherCircles, otherBridges)
+
+	if tierIdx < 0 {
+		tw, th := tile.size()
+
+		if depth < r.cfg.MaxDepth && tw > 2*r.cfg.MinTileSize && th > 2*r.cfg.MinTileSize {
+			prepRelease()
+
+			midX := (tile.MinX + tile.MaxX) / 2
+			midY := (tile.MinY + tile.MaxY) / 2
+
+			children := [4]tileBounds{
+				{tile.MinX, tile.MinY, midX, midY},
+				{midX, tile.MinY, tile.MaxX, midY},
+				{tile.MinX, midY, midX, tile.MaxY},
+				{midX, midY, tile.MaxX, tile.MaxY},
+			}
+
+			for _, child := range children {
+				r.processTileParallel(resolution, groups, child, depth+1, taskChan, tilesSkipped)
+			}
+
+			if r.cfg.Debug {
+				taskChan <- tileDrawTask{tile: tile, hasDebug: true}
+			}
+			return
+		}
+	}
+
+	filtered, matRelease := materializeGroupsFromPrep(r.pools, groups, prep)
+	release := func() {
+		matRelease()
+		prepRelease()
+	}
+
+	clipped := 0
+	if tierIdx < 0 {
+		tierIdx = len(r.shaders) - 1
+		clipped = clipGroupsToTier(filtered, r.cfg.Tiers[tierIdx])
+	}
+
+	pixelRect := tileToPixelRect(tile, resolution)
+	if pixelRect.Dx() <= 0 || pixelRect.Dy() <= 0 {
+		release()
+		if r.cfg.Debug {
+			taskChan <- tileDrawTask{tile: tile, hasDebug: true}
+		}
+		return
+	}
+
+	taskChan <- tileDrawTask{
+		tile:           tile,
+		pixelRect:      pixelRect,
+		tierIdx:        tierIdx,
+		filtered:       filtered,
+		release:        release,
+		circlesClipped: clipped,
+		hasDraw:        true,
+		hasDebug:       r.cfg.Debug,
+	}
 }
 
 func (r *Renderer) drawTile(
@@ -144,16 +367,20 @@ func (r *Renderer) drawTile(
 	depth int,
 	stats *Stats,
 ) error {
+	// Cheap counting pass: decides tier/subdivision without materializing
+	// any filtered circle/bridge data, since that's thrown away whenever
+	// the tile ends up subdividing instead of drawing.
+	prep, any, mainCircles, mainBridges, otherCircles, otherBridges, prepRelease := prepareGroupsForTile(r.pools, groups, tile)
+
+	if !any {
+		prepRelease()
+		stats.TilesSkipped++
+		return nil
+	}
+
 	if r.cfg.Debug {
 		// Deferred so it draws last, on top of this tile's content and any children's.
 		defer r.drawDebugOutline(dst, resolution, tile)
-	}
-
-	filtered, mainCircles, mainBridges, otherCircles, otherBridges := filterGroupsForTile(groups, tile)
-
-	if len(filtered) == 0 {
-		stats.TilesSkipped++
-		return nil
 	}
 
 	tierIdx := r.pickTier(mainCircles, mainBridges, otherCircles, otherBridges)
@@ -162,6 +389,8 @@ func (r *Renderer) drawTile(
 		tw, th := tile.size()
 
 		if depth < r.cfg.MaxDepth && tw > 2*r.cfg.MinTileSize && th > 2*r.cfg.MinTileSize {
+			prepRelease()
+
 			midX := (tile.MinX + tile.MaxX) / 2
 			midY := (tile.MinY + tile.MaxY) / 2
 
@@ -180,7 +409,16 @@ func (r *Renderer) drawTile(
 
 			return nil
 		}
+	}
 
+	// Now actually drawing this tile (either a tier fit, or a final
+	// fallback): materialize the filtered circle/bridge data from the
+	// bitsets prepareGroupsForTile already computed above.
+	filtered, matRelease := materializeGroupsFromPrep(r.pools, groups, prep)
+	defer prepRelease()
+	defer matRelease()
+
+	if tierIdx < 0 {
 		// Can't subdivide further: fall back to the largest tier and clip.
 		tierIdx = len(r.shaders) - 1
 		clipped := clipGroupsToTier(filtered, r.cfg.Tiers[tierIdx])
@@ -217,8 +455,8 @@ func (r *Renderer) pickTier(mainCircles, mainBridges, otherCircles, otherBridges
 }
 
 var (
-	debugTopLeftColor     = color.NRGBA{A: 128}
-	debugBottomRightColor = color.NRGBA{R: 255, G: 255, B: 255, A: 128}
+	debugTopLeftColor     = color.NRGBA{R: 64, G: 64, B: 64, A: 128}
+	debugBottomRightColor = color.NRGBA{R: 192, G: 192, B: 192, A: 128}
 )
 
 // drawDebugOutline draws a 1px outline around tile: black top/left edges,
@@ -288,81 +526,163 @@ func segmentIntersectsRect(x1, y1, x2, y2 float32, rect tileBounds) bool {
 		clip(dy, rect.MaxY-y1)
 }
 
-// filterGroupsForTile returns the subset of groups/circles/bridges that
-// overlap tile, along with the aggregate main/other counts (mirroring
-// ConfigForGroups' semantics: main = largest single group, other = sum of
-// all groups) used to pick a shader tier. Circles and bridges are each
-// padded individually (by radius, resp. bridge thickness) rather than
-// padding tile itself.
-func filterGroupsForTile(groups []Group, tile tileBounds) (filtered []Group, mainCircles, mainBridges, otherCircles, otherBridges int) {
-	for _, g := range groups {
-		fg, ok := filterGroup(g, tile)
-		if !ok {
+// prepareGroupsForTile computes each group's included-circle bitset for
+// tile exactly once (via computeIncludedSet), along with the aggregate
+// main/other counts (mirroring ConfigForGroups' semantics: main = largest
+// single group, other = sum of all groups) used to pick a shader tier.
+// The returned prep is later reused by materializeGroupsFromPrep when the
+// tile ends up drawn, instead of recomputing the same bitset; if the tile
+// subdivides instead, the caller just calls release without materializing.
+func prepareGroupsForTile(pools *rendererPools, groups []Group, tile tileBounds) (prep []groupPrep, any bool, mainCircles, mainBridges, otherCircles, otherBridges int, release func()) {
+	prepPtr := pools.preps.get()
+	p := (*prepPtr)[:len(groups)]
+	for i := range p {
+		p[i] = groupPrep{} // clear stale bitset pointers from a reused pooled slice
+	}
+
+	for i := range groups {
+		g := &groups[i]
+		if len(g.Circles) == 0 {
 			continue
 		}
 
-		filtered = append(filtered, fg)
+		included := pools.bitsets.get()
+		if !computeIncludedSet(pools, g, tile, included) {
+			pools.bitsets.put(included)
+			continue
+		}
 
-		if len(fg.Circles) > mainCircles {
-			mainCircles = len(fg.Circles)
+		circleCount := included.Count()
+		bridgeCount := 0
+		for _, b := range g.Bridges {
+			if included.Has(b.A) && included.Has(b.B) {
+				bridgeCount++
+			}
 		}
-		if len(fg.Bridges) > mainBridges {
-			mainBridges = len(fg.Bridges)
+
+		p[i] = groupPrep{included: included, circleCount: circleCount, bridgeCount: bridgeCount}
+
+		any = true
+		if circleCount > mainCircles {
+			mainCircles = circleCount
 		}
-		otherCircles += len(fg.Circles)
-		otherBridges += len(fg.Bridges)
+		if bridgeCount > mainBridges {
+			mainBridges = bridgeCount
+		}
+		otherCircles += circleCount
+		otherBridges += bridgeCount
 	}
 
-	return filtered, mainCircles, mainBridges, otherCircles, otherBridges
+	release = func() {
+		for i := range p {
+			if p[i].included != nil {
+				pools.bitsets.put(p[i].included)
+				p[i].included = nil
+			}
+		}
+		pools.preps.put(prepPtr)
+	}
+
+	return p, any, mainCircles, mainBridges, otherCircles, otherBridges, release
 }
 
-// filterGroup filters g's circles down to those overlapping tile (padded by
-// each circle's own radius) plus the endpoints of any bridge whose segment
-// crosses tile (padded by the group's largest bridge radius, since a
-// bridge's rendered shape bulges by up to that much off its segment),
-// remapping bridge endpoints accordingly. ok is false when no circles
-// survive.
-func filterGroup(g Group, tile tileBounds) (Group, bool) {
-	included := make([]bool, len(g.Circles))
-	found := false
-	for i, c := range g.Circles {
-		if circleOverlapsTile(c, tile) {
-			included[i] = true
-			found = true
-		}
-	}
+// probeGroupsForTile is a probe-only convenience wrapper around
+// prepareGroupsForTile for callers (tests, non-hot-path code) that don't
+// need the materialized circle/bridge data.
+func probeGroupsForTile(pools *rendererPools, groups []Group, tile tileBounds) (any bool, mainCircles, mainBridges, otherCircles, otherBridges int) {
+	_, any, mainCircles, mainBridges, otherCircles, otherBridges, release := prepareGroupsForTile(pools, groups, tile)
+	release()
+	return any, mainCircles, mainBridges, otherCircles, otherBridges
+}
 
-	var maxBridgeRadius float32
-	for _, b := range g.Bridges {
-		if b.MiddleRadius > maxBridgeRadius {
-			maxBridgeRadius = b.MiddleRadius
-		}
-	}
-	bridgeTile := tile.padded(maxBridgeRadius)
+// computeIncludedSet marks included[i] true for each of g's circles
+// overlapping tile (padded by each circle's own radius) plus the endpoints
+// of any bridge whose segment crosses tile (padded by that bridge's own
+// MiddleRadius, since its rendered shape bulges by up to that much off its
+// segment). Reports whether anything was included. pools supplies scratch
+// buffers for filterCirclesOverlap.
+func computeIncludedSet(pools *rendererPools, g *Group, tile tileBounds, included *bitset.BitSet) bool {
+	found := filterCirclesOverlap(pools, g.Circles, tile, included)
 
 	for _, b := range g.Bridges {
 		a, c := g.Circles[b.A], g.Circles[b.B]
+		bridgeTile := tile.padded(b.MiddleRadius)
 		if segmentIntersectsRect(a.X, a.Y, c.X, c.Y, bridgeTile) {
-			included[b.A] = true
-			included[b.B] = true
+			included.Set(b.A)
+			included.Set(b.B)
 			found = true
 		}
 	}
 
-	if !found {
-		return Group{}, false
+	return found
+}
+
+// materializeGroupsForTile is a convenience wrapper for callers (tests,
+// non-hot-path code) that don't already have a prepareGroupsForTile
+// result; the Draw hot path uses materializeGroupsFromPrep directly to
+// avoid recomputing the included bitsets it already has.
+func materializeGroupsForTile(pools *rendererPools, groups []Group, tile tileBounds) (filtered []Group, release func()) {
+	prep, _, _, _, _, _, prepRelease := prepareGroupsForTile(pools, groups, tile)
+	filtered, matRelease := materializeGroupsFromPrep(pools, groups, prep)
+	return filtered, func() {
+		matRelease()
+		prepRelease()
+	}
+}
+
+// materializeGroupsFromPrep builds the actual filtered subset of
+// groups/circles/bridges from bitsets already computed by
+// prepareGroupsForTile, remapping bridge endpoints accordingly. All
+// backing storage comes from pools; the caller must invoke the returned
+// release func (typically via defer) once it's done using the result, e.g.
+// right after the draw call that consumes it.
+func materializeGroupsFromPrep(pools *rendererPools, groups []Group, prep []groupPrep) (filtered []Group, release func()) {
+	filteredPtr := pools.groups.get()
+	*filteredPtr = (*filteredPtr)[:0]
+
+	borrowed := make([]func(), 0, 2*len(groups)+1)
+	borrowed = append(borrowed, func() { pools.groups.put(filteredPtr) })
+
+	for i := range groups {
+		if prep[i].included == nil {
+			continue
+		}
+
+		fg, release := materializeGroupFromIncluded(pools, &groups[i], prep[i].included)
+		borrowed = append(borrowed, release)
+		*filteredPtr = append(*filteredPtr, fg)
 	}
 
-	remap := make([]int, len(g.Circles))
-	var circles []Circle
-	for i, inc := range included {
-		if inc {
-			remap[i] = len(circles) + 1 // +1 so the zero value means "dropped"
-			circles = append(circles, g.Circles[i])
+	return *filteredPtr, func() {
+		for _, r := range borrowed {
+			r()
 		}
 	}
+}
 
-	var bridges []Bridge
+// materializeGroupFromIncluded filters g's circles down to those already
+// marked in included (computed by prepareGroupsForTile via
+// computeIncludedSet) plus the remapped bridges whose endpoints both
+// survived.
+func materializeGroupFromIncluded(pools *rendererPools, g *Group, included *bitset.BitSet) (fg Group, release func()) {
+	remapPtr := pools.ints.get()
+	defer pools.ints.put(remapPtr)
+	remap := (*remapPtr)[:len(g.Circles)]
+
+	circlesPtr := pools.circles.get()
+	circles := (*circlesPtr)[:0]
+	for i := range g.Circles {
+		if included.Has(i) {
+			remap[i] = len(circles) + 1 // +1 so the zero value means "dropped"
+			circles = append(circles, g.Circles[i])
+		} else {
+			remap[i] = 0
+		}
+	}
+	*circlesPtr = circles
+
+	bridgesPtr := pools.bridges.get()
+	bridges := (*bridgesPtr)[:0]
 	for _, b := range g.Bridges {
 		na, nb := remap[b.A], remap[b.B]
 		if na == 0 || nb == 0 {
@@ -370,8 +690,14 @@ func filterGroup(g Group, tile tileBounds) (Group, bool) {
 		}
 		bridges = append(bridges, Bridge{A: na - 1, B: nb - 1, MiddleRadius: b.MiddleRadius})
 	}
+	*bridgesPtr = bridges
 
-	return Group{Circles: circles, Bridges: bridges, Color: g.Color}, true
+	release = func() {
+		pools.circles.put(circlesPtr)
+		pools.bridges.put(bridgesPtr)
+	}
+
+	return Group{Circles: circles, Bridges: bridges, Color: g.Color}, release
 }
 
 // clipGroupsToTier truncates each group's circles/bridges in place to fit
