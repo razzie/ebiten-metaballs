@@ -22,6 +22,15 @@ func poolsForGroups(groups []Group) *rendererPools {
 	return newRendererPools(len(groups), maxCircles, maxBridges)
 }
 
+// testRenderer builds a bare Renderer for tests that only exercise tile
+// filtering/materialization methods, skipping NewRenderer's shader compilation.
+func testRenderer(groups []Group, smoothK float32) *Renderer {
+	return &Renderer{
+		pools: poolsForGroups(groups),
+		cfg:   RendererConfig{Common: ShaderCommonConfig{SmoothK: smoothK}},
+	}
+}
+
 func TestProbeMaterializeAgree(t *testing.T) {
 	tile := tileBounds{MinX: 0, MinY: 0, MaxX: 0.5, MaxY: 0.5}
 
@@ -39,12 +48,15 @@ func TestProbeMaterializeAgree(t *testing.T) {
 		),
 	}
 
-	any, mainCircles, mainBridges, otherCircles, otherBridges := probeGroupsForTile(poolsForGroups(groups), groups, tile)
+	r := testRenderer(groups, 0)
+
+	_, any, cap, release := r.prepareGroupsForTile(groups, tile)
+	defer release()
 	if !any {
 		t.Fatalf("expected probe to find overlap")
 	}
 
-	filtered, release := materializeGroupsForTile(poolsForGroups(groups), groups, tile)
+	filtered, release := r.materializeGroupsForTile(groups, tile)
 	defer release()
 
 	if len(filtered) != 1 {
@@ -52,11 +64,11 @@ func TestProbeMaterializeAgree(t *testing.T) {
 	}
 	fg := filtered[0]
 
-	if len(fg.Circles) != mainCircles || len(fg.Circles) != otherCircles {
-		t.Errorf("circle count mismatch: probe main=%d other=%d materialize=%d", mainCircles, otherCircles, len(fg.Circles))
+	if len(fg.Circles) != cap.MainCircles || len(fg.Circles) != cap.OtherCircles {
+		t.Errorf("circle count mismatch: probe main=%d other=%d materialize=%d", cap.MainCircles, cap.OtherCircles, len(fg.Circles))
 	}
-	if len(fg.Bridges) != mainBridges || len(fg.Bridges) != otherBridges {
-		t.Errorf("bridge count mismatch: probe main=%d other=%d materialize=%d", mainBridges, otherBridges, len(fg.Bridges))
+	if len(fg.Bridges) != cap.MainBridges || len(fg.Bridges) != cap.OtherBridges {
+		t.Errorf("bridge count mismatch: probe main=%d other=%d materialize=%d", cap.MainBridges, cap.OtherBridges, len(fg.Bridges))
 	}
 
 	// Circle 0 (directly overlapping) and circle 2 (pulled in via the
@@ -74,13 +86,15 @@ func TestProbeMaterializeAgree(t *testing.T) {
 func TestProbeGroupsForTileNoOverlap(t *testing.T) {
 	tile := tileBounds{MinX: 0, MinY: 0, MaxX: 0.1, MaxY: 0.1}
 	groups := []Group{mustGroup([]Circle{{X: 0.9, Y: 0.9, Radius: 0.01}}, nil)}
+	r := testRenderer(groups, 0)
 
-	any, _, _, _, _ := probeGroupsForTile(poolsForGroups(groups), groups, tile)
+	_, any, _, release := r.prepareGroupsForTile(groups, tile)
+	defer release()
 	if any {
 		t.Fatalf("expected no overlap")
 	}
 
-	filtered, release := materializeGroupsForTile(poolsForGroups(groups), groups, tile)
+	filtered, release := r.materializeGroupsForTile(groups, tile)
 	defer release()
 	if len(filtered) != 0 {
 		t.Fatalf("expected 0 filtered groups, got %d", len(filtered))
@@ -108,7 +122,7 @@ func TestFilterCirclesOverlapMixedLarge(t *testing.T) {
 
 	pools := newRendererPools(1, n, 0)
 	included := bitset.New(n)
-	found := filterCirclesOverlap(pools, circles, tile, included)
+	found := filterCirclesOverlap(pools, circles, tile, included, 0)
 	if !found {
 		t.Fatalf("expected at least one match")
 	}
@@ -124,9 +138,9 @@ func TestFilterCirclesOverlapMixedLarge(t *testing.T) {
 func TestFilterPoolReuseAcrossCalls(t *testing.T) {
 	tile := tileBounds{MinX: 0, MinY: 0, MaxX: 1, MaxY: 1}
 
-	// One pools object reused across calls with different-sized groups, so
-	// the small group sub-slices the big group's pooled buffers.
-	pools := newRendererPools(1, 20, 0)
+	// One Renderer's pools reused across calls with different-sized groups,
+	// so the small group sub-slices the big group's pooled buffers.
+	r := &Renderer{pools: newRendererPools(1, 20, 0)}
 
 	for range 3 {
 		big := mustGroup(make([]Circle, 20), nil)
@@ -134,14 +148,14 @@ func TestFilterPoolReuseAcrossCalls(t *testing.T) {
 			big.Circles[i] = Circle{X: 0.5, Y: 0.5, Radius: 0.01}
 		}
 
-		filtered, release := materializeGroupsForTile(pools, []Group{big}, tile)
+		filtered, release := r.materializeGroupsForTile([]Group{big}, tile)
 		if len(filtered) != 1 || len(filtered[0].Circles) != 20 {
 			t.Fatalf("expected all 20 circles included, got %d groups / %d circles", len(filtered), len(filtered[0].Circles))
 		}
 		release()
 
 		small := mustGroup([]Circle{{X: 0.5, Y: 0.5, Radius: 0.01}}, nil)
-		filtered, release = materializeGroupsForTile(pools, []Group{small}, tile)
+		filtered, release = r.materializeGroupsForTile([]Group{small}, tile)
 		if len(filtered) != 1 || len(filtered[0].Circles) != 1 {
 			t.Fatalf("expected 1 circle included, got %d groups / %d circles", len(filtered), len(filtered[0].Circles))
 		}

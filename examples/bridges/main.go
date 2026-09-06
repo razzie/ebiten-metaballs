@@ -158,12 +158,13 @@ func NewGame() (*Game, error) {
 	// tiles) up to large (rare, dense tiles after subdivision). Bridge
 	// capacities scale with circle capacities since each cluster chain has
 	// one bridge fewer than its circle count.
-	tiers := []metaballs.ShaderConfig{
-		{MainCircles: 16, MainBridges: 8, OtherCircles: 16, OtherBridges: 8, SmoothK: smoothK, LightDirX: lightDirX, LightDirY: lightDirY, EdgeThickness: edgeThickness},
-		{MainCircles: 32, MainBridges: 16, OtherCircles: 32, OtherBridges: 16, SmoothK: smoothK, LightDirX: lightDirX, LightDirY: lightDirY, EdgeThickness: edgeThickness},
+	tiers := []metaballs.ShaderCapacity{
+		{MainCircles: 16, MainBridges: 8, OtherCircles: 16, OtherBridges: 8},
+		{MainCircles: 32, MainBridges: 16, OtherCircles: 32, OtherBridges: 16},
 	}
 
 	renderer, err := metaballs.NewRenderer(metaballs.RendererConfig{
+		Common:      metaballs.ShaderCommonConfig{SmoothK: smoothK, LightDirX: lightDirX, LightDirY: lightDirY, EdgeThickness: edgeThickness},
 		Tiers:       tiers,
 		RootCols:    1,
 		RootRows:    1,

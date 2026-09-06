@@ -53,7 +53,10 @@ func NewGame() (*Game, error) {
 		},
 	}
 
-	shader, err := metaballs.NewMetaballShader(metaballs.ConfigForGroups(groups, 0.1, 1, 0, 0.04))
+	shader, err := metaballs.NewMetaballShader(metaballs.ShaderConfig{
+		ShaderCapacity:     metaballs.CapacityForGroups(groups),
+		ShaderCommonConfig: metaballs.ShaderCommonConfig{SmoothK: 0.1, LightDirX: 1, LightDirY: 0, EdgeThickness: 0.04},
+	})
 	if err != nil {
 		return nil, err
 	}

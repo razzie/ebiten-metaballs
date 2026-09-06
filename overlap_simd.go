@@ -23,12 +23,12 @@ func simdLaneCount() int {
 // groups it batches the AABB test across SIMD lanes; small groups fall
 // back to the scalar scan since the AoS->SoA transpose wouldn't pay off.
 // pools supplies the float32/int32 scratch buffers.
-func filterCirclesOverlap(pools *rendererPools, circles []Circle, tile tileBounds, included *bitset.BitSet) bool {
+func filterCirclesOverlap(pools *rendererPools, circles []Circle, tile tileBounds, included *bitset.BitSet, smoothK float32) bool {
 	n := len(circles)
 	if n < simdCircleThreshold {
 		found := false
 		for i, c := range circles {
-			if circleOverlapsTile(c, tile) {
+			if circleOverlapsTile(c, tile, smoothK) {
 				included.Set(i)
 				found = true
 			}
@@ -45,7 +45,7 @@ func filterCirclesOverlap(pools *rendererPools, circles []Circle, tile tileBound
 	xs, ys, rs := (*xsPtr)[:n], (*ysPtr)[:n], (*rsPtr)[:n]
 
 	for i, c := range circles {
-		xs[i], ys[i], rs[i] = c.X, c.Y, c.Radius
+		xs[i], ys[i], rs[i] = c.X, c.Y, c.Radius+smoothK // pad by smoothK: blending bulges the shape beyond its radius
 	}
 
 	minX := simd.BroadcastFloat32s(tile.MinX)

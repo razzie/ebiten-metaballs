@@ -14,10 +14,10 @@ func simdLaneCount() int {
 // overlaps tile, returning whether any circle matched. pools is unused in
 // the scalar build (no SIMD scratch buffers needed) but kept for a uniform
 // signature with the SIMD build.
-func filterCirclesOverlap(pools *rendererPools, circles []Circle, tile tileBounds, included *bitset.BitSet) bool {
+func filterCirclesOverlap(pools *rendererPools, circles []Circle, tile tileBounds, included *bitset.BitSet, smoothK float32) bool {
 	found := false
 	for i, c := range circles {
-		if circleOverlapsTile(c, tile) {
+		if circleOverlapsTile(c, tile, smoothK) {
 			included.Set(i)
 			found = true
 		}

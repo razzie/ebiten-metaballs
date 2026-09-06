@@ -39,18 +39,31 @@ func formatKageVec2(x, y float32) string {
 	return fmt.Sprintf("vec2(%s, %s)", formatKageFloat(x), formatKageFloat(y))
 }
 
-// ShaderConfig sets the compile-time constants baked into the generated Kage shader:
-// fixed-size array capacities, the smooth-min blending radius, and edge shading.
-// LightDirX/LightDirY of (0, 0) disables edge shading entirely (no gradients computed).
-type ShaderConfig struct {
-	MainCircles   int
-	MainBridges   int
-	OtherCircles  int
-	OtherBridges  int
+// ShaderCapacity sets the fixed-size array capacities baked into the
+// generated Kage shader. This is the only part of a shader's config that
+// should vary across a Renderer's capacity tiers.
+type ShaderCapacity struct {
+	MainCircles  int
+	MainBridges  int
+	OtherCircles int
+	OtherBridges int
+}
+
+// ShaderCommonConfig sets the smooth-min blending radius and edge shading,
+// shared by every capacity tier of a Renderer. LightDirX/LightDirY of
+// (0, 0) disables edge shading entirely (no gradients computed).
+type ShaderCommonConfig struct {
 	SmoothK       float32
 	LightDirX     float32
 	LightDirY     float32
 	EdgeThickness float32
+}
+
+// ShaderConfig is the full set of compile-time constants for a single
+// generated Kage shader.
+type ShaderConfig struct {
+	ShaderCapacity
+	ShaderCommonConfig
 }
 
 type Circle struct {
@@ -104,13 +117,12 @@ func combineGroups(groups []Group, exclude int) Group {
 	return out
 }
 
-// ConfigForGroups derives shader array capacities from a set of groups: main
+// CapacityForGroups derives shader array capacities from a set of groups: main
 // capacities cover the largest single group, other capacities cover the sum
 // of all groups (a safe upper bound for any combined "other" pass). Bridge
 // and other-circle capacities are left at 0 when unused, so the generated
-// shader can skip those loops entirely. lightDirX/lightDirY of (0, 0)
-// disables edge shading.
-func ConfigForGroups(groups []Group, smoothK float32, lightDirX, lightDirY, edgeThickness float32) ShaderConfig {
+// shader can skip those loops entirely.
+func CapacityForGroups(groups []Group) ShaderCapacity {
 	var mainCircles, mainBridges, totalCircles, totalBridges int
 
 	for _, g := range groups {
@@ -125,15 +137,11 @@ func ConfigForGroups(groups []Group, smoothK float32, lightDirX, lightDirY, edge
 		totalBridges += len(g.Bridges)
 	}
 
-	return ShaderConfig{
-		MainCircles:   mainCircles,
-		MainBridges:   mainBridges,
-		OtherCircles:  totalCircles,
-		OtherBridges:  totalBridges,
-		SmoothK:       smoothK,
-		LightDirX:     lightDirX,
-		LightDirY:     lightDirY,
-		EdgeThickness: edgeThickness,
+	return ShaderCapacity{
+		MainCircles:  mainCircles,
+		MainBridges:  mainBridges,
+		OtherCircles: totalCircles,
+		OtherBridges: totalBridges,
 	}
 }
 

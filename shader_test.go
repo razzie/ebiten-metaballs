@@ -10,26 +10,16 @@ import "testing"
 func TestNewMetaballShaderCompilesTemplates(t *testing.T) {
 	configs := map[string]ShaderConfig{
 		"basic": {
-			MainCircles:  8,
-			OtherCircles: 8,
-			SmoothK:      0.02,
+			ShaderCapacity:     ShaderCapacity{MainCircles: 8, OtherCircles: 8},
+			ShaderCommonConfig: ShaderCommonConfig{SmoothK: 0.02},
 		},
 		"basic with bridges": {
-			MainCircles:  8,
-			MainBridges:  4,
-			OtherCircles: 8,
-			OtherBridges: 4,
-			SmoothK:      0.02,
+			ShaderCapacity:     ShaderCapacity{MainCircles: 8, MainBridges: 4, OtherCircles: 8, OtherBridges: 4},
+			ShaderCommonConfig: ShaderCommonConfig{SmoothK: 0.02},
 		},
 		"edge": {
-			MainCircles:   8,
-			MainBridges:   4,
-			OtherCircles:  8,
-			OtherBridges:  4,
-			SmoothK:       0.02,
-			LightDirX:     1,
-			LightDirY:     -1,
-			EdgeThickness: 0.015,
+			ShaderCapacity:     ShaderCapacity{MainCircles: 8, MainBridges: 4, OtherCircles: 8, OtherBridges: 4},
+			ShaderCommonConfig: ShaderCommonConfig{SmoothK: 0.02, LightDirX: 1, LightDirY: -1, EdgeThickness: 0.015},
 		},
 	}
 

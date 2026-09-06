@@ -15,9 +15,12 @@ import (
 // RendererConfig configures a Renderer: a pool of shaders for different
 // capacity tiers, plus grid-planning parameters for adaptive tiling.
 type RendererConfig struct {
-	// Tiers must be sorted ascending by capacity. All tiers must share the
-	// same SmoothK, LightDirX, LightDirY and EdgeThickness.
-	Tiers []ShaderConfig
+	// Common is shared by every tier's generated shader (SmoothK, LightDir,
+	// EdgeThickness).
+	Common ShaderCommonConfig
+
+	// Tiers must be sorted ascending by capacity.
+	Tiers []ShaderCapacity
 
 	// RootCols/RootRows define the initial coarse grid over the visible uv
 	// domain (derived per Draw from dst's size multiplied by the uv scale),
@@ -78,16 +81,9 @@ func NewRenderer(cfg RendererConfig) (*Renderer, error) {
 		return nil, fmt.Errorf("renderer config must have a positive MinTileSize")
 	}
 
-	first := cfg.Tiers[0]
 	shaders := make([]*MetaballShader, len(cfg.Tiers))
 
 	for i, tier := range cfg.Tiers {
-		if tier.SmoothK != first.SmoothK ||
-			tier.LightDirX != first.LightDirX ||
-			tier.LightDirY != first.LightDirY ||
-			tier.EdgeThickness != first.EdgeThickness {
-			return nil, fmt.Errorf("renderer tiers must share the same SmoothK/LightDir/EdgeThickness: tier %d differs from tier 0", i)
-		}
 		if i > 0 {
 			prev := cfg.Tiers[i-1]
 			if tier.MainCircles < prev.MainCircles || tier.MainBridges < prev.MainBridges ||
@@ -96,7 +92,7 @@ func NewRenderer(cfg RendererConfig) (*Renderer, error) {
 			}
 		}
 
-		shader, err := NewMetaballShader(tier)
+		shader, err := NewMetaballShader(ShaderConfig{ShaderCapacity: tier, ShaderCommonConfig: cfg.Common})
 		if err != nil {
 			return nil, fmt.Errorf("compile renderer tier %d: %w", i, err)
 		}
@@ -324,7 +320,7 @@ func (r *Renderer) processTileParallel(
 	taskChan chan<- tileDrawTask,
 	tilesSkipped *int,
 ) {
-	prep, any, mainCircles, mainBridges, otherCircles, otherBridges, prepRelease := prepareGroupsForTile(r.pools, groups, tile)
+	prep, any, cap, prepRelease := r.prepareGroupsForTile(groups, tile)
 
 	if !any {
 		prepRelease()
@@ -332,7 +328,7 @@ func (r *Renderer) processTileParallel(
 		return
 	}
 
-	tierIdx := r.pickTier(mainCircles, mainBridges, otherCircles, otherBridges)
+	tierIdx := r.pickTier(cap)
 
 	if tierIdx < 0 {
 		tw, th := tile.size()
@@ -405,7 +401,7 @@ func (r *Renderer) drawTile(
 	// Cheap counting pass: decides tier/subdivision without materializing
 	// any filtered circle/bridge data, since that's thrown away whenever
 	// the tile ends up subdividing instead of drawing.
-	prep, any, mainCircles, mainBridges, otherCircles, otherBridges, prepRelease := prepareGroupsForTile(r.pools, groups, tile)
+	prep, any, cap, prepRelease := r.prepareGroupsForTile(groups, tile)
 
 	if !any {
 		prepRelease()
@@ -418,7 +414,7 @@ func (r *Renderer) drawTile(
 		defer r.drawDebugOutline(dst, xform, tile)
 	}
 
-	tierIdx := r.pickTier(mainCircles, mainBridges, otherCircles, otherBridges)
+	tierIdx := r.pickTier(cap)
 
 	if tierIdx < 0 {
 		tw, th := tile.size()
@@ -479,10 +475,10 @@ func (r *Renderer) drawTile(
 	return nil
 }
 
-func (r *Renderer) pickTier(mainCircles, mainBridges, otherCircles, otherBridges int) int {
+func (r *Renderer) pickTier(cap ShaderCapacity) int {
 	for i, tier := range r.cfg.Tiers {
-		if mainCircles <= tier.MainCircles && mainBridges <= tier.MainBridges &&
-			otherCircles <= tier.OtherCircles && otherBridges <= tier.OtherBridges {
+		if cap.MainCircles <= tier.MainCircles && cap.MainBridges <= tier.MainBridges &&
+			cap.OtherCircles <= tier.OtherCircles && cap.OtherBridges <= tier.OtherBridges {
 			return i
 		}
 	}
@@ -522,10 +518,13 @@ func tileToPixelRect(tile tileBounds, invScale [2]float32) image.Rectangle {
 	)
 }
 
-// circleOverlapsTile reports whether a circle's AABB overlaps the tile.
-func circleOverlapsTile(c Circle, tile tileBounds) bool {
-	return c.X+c.Radius >= tile.MinX && c.X-c.Radius <= tile.MaxX &&
-		c.Y+c.Radius >= tile.MinY && c.Y-c.Radius <= tile.MaxY
+// circleOverlapsTile reports whether a circle's AABB overlaps the tile,
+// padded by smoothK since smooth-min blending bulges the rendered shape
+// beyond the nominal radius.
+func circleOverlapsTile(c Circle, tile tileBounds, smoothK float32) bool {
+	r := c.Radius + smoothK
+	return c.X+r >= tile.MinX && c.X-r <= tile.MaxX &&
+		c.Y+r >= tile.MinY && c.Y-r <= tile.MaxY
 }
 
 // segmentIntersectsRect reports whether the segment from (x1,y1) to (x2,y2)
@@ -570,8 +569,8 @@ func segmentIntersectsRect(x1, y1, x2, y2 float32, rect tileBounds) bool {
 // The returned prep is later reused by materializeGroupsFromPrep when the
 // tile ends up drawn, instead of recomputing the same bitset; if the tile
 // subdivides instead, the caller just calls release without materializing.
-func prepareGroupsForTile(pools *rendererPools, groups []Group, tile tileBounds) (prep []groupPrep, any bool, mainCircles, mainBridges, otherCircles, otherBridges int, release func()) {
-	prepPtr := pools.preps.get()
+func (r *Renderer) prepareGroupsForTile(groups []Group, tile tileBounds) (prep []groupPrep, any bool, cap ShaderCapacity, release func()) {
+	prepPtr := r.pools.preps.get()
 	p := (*prepPtr)[:len(groups)]
 	for i := range p {
 		p[i] = groupPrep{} // clear stale bitset pointers from a reused pooled slice
@@ -583,9 +582,9 @@ func prepareGroupsForTile(pools *rendererPools, groups []Group, tile tileBounds)
 			continue
 		}
 
-		included := pools.bitsets.get()
-		if !computeIncludedSet(pools, g, tile, included) {
-			pools.bitsets.put(included)
+		included := r.pools.bitsets.get()
+		if !computeIncludedSet(r.pools, g, tile, included, r.cfg.Common.SmoothK) {
+			r.pools.bitsets.put(included)
 			continue
 		}
 
@@ -600,36 +599,27 @@ func prepareGroupsForTile(pools *rendererPools, groups []Group, tile tileBounds)
 		p[i] = groupPrep{included: included, circleCount: circleCount, bridgeCount: bridgeCount}
 
 		any = true
-		if circleCount > mainCircles {
-			mainCircles = circleCount
+		if circleCount > cap.MainCircles {
+			cap.MainCircles = circleCount
 		}
-		if bridgeCount > mainBridges {
-			mainBridges = bridgeCount
+		if bridgeCount > cap.MainBridges {
+			cap.MainBridges = bridgeCount
 		}
-		otherCircles += circleCount
-		otherBridges += bridgeCount
+		cap.OtherCircles += circleCount
+		cap.OtherBridges += bridgeCount
 	}
 
 	release = func() {
 		for i := range p {
 			if p[i].included != nil {
-				pools.bitsets.put(p[i].included)
+				r.pools.bitsets.put(p[i].included)
 				p[i].included = nil
 			}
 		}
-		pools.preps.put(prepPtr)
+		r.pools.preps.put(prepPtr)
 	}
 
-	return p, any, mainCircles, mainBridges, otherCircles, otherBridges, release
-}
-
-// probeGroupsForTile is a probe-only convenience wrapper around
-// prepareGroupsForTile for callers (tests, non-hot-path code) that don't
-// need the materialized circle/bridge data.
-func probeGroupsForTile(pools *rendererPools, groups []Group, tile tileBounds) (any bool, mainCircles, mainBridges, otherCircles, otherBridges int) {
-	_, any, mainCircles, mainBridges, otherCircles, otherBridges, release := prepareGroupsForTile(pools, groups, tile)
-	release()
-	return any, mainCircles, mainBridges, otherCircles, otherBridges
+	return p, any, cap, release
 }
 
 // computeIncludedSet marks included[i] true for each of g's circles
@@ -638,12 +628,12 @@ func probeGroupsForTile(pools *rendererPools, groups []Group, tile tileBounds) (
 // MiddleRadius, since its rendered shape bulges by up to that much off its
 // segment). Reports whether anything was included. pools supplies scratch
 // buffers for filterCirclesOverlap.
-func computeIncludedSet(pools *rendererPools, g *Group, tile tileBounds, included *bitset.BitSet) bool {
-	found := filterCirclesOverlap(pools, g.Circles, tile, included)
+func computeIncludedSet(pools *rendererPools, g *Group, tile tileBounds, included *bitset.BitSet, smoothK float32) bool {
+	found := filterCirclesOverlap(pools, g.Circles, tile, included, smoothK)
 
 	for _, b := range g.Bridges {
 		a, c := g.Circles[b.A], g.Circles[b.B]
-		bridgeTile := tile.padded(b.MiddleRadius)
+		bridgeTile := tile.padded(b.MiddleRadius + smoothK)
 		if segmentIntersectsRect(a.X, a.Y, c.X, c.Y, bridgeTile) {
 			included.Set(b.A)
 			included.Set(b.B)
@@ -658,9 +648,9 @@ func computeIncludedSet(pools *rendererPools, g *Group, tile tileBounds, include
 // non-hot-path code) that don't already have a prepareGroupsForTile
 // result; the Draw hot path uses materializeGroupsFromPrep directly to
 // avoid recomputing the included bitsets it already has.
-func materializeGroupsForTile(pools *rendererPools, groups []Group, tile tileBounds) (filtered []Group, release func()) {
-	prep, _, _, _, _, _, prepRelease := prepareGroupsForTile(pools, groups, tile)
-	filtered, matRelease := materializeGroupsFromPrep(pools, groups, prep)
+func (r *Renderer) materializeGroupsForTile(groups []Group, tile tileBounds) (filtered []Group, release func()) {
+	prep, _, _, prepRelease := r.prepareGroupsForTile(groups, tile)
+	filtered, matRelease := materializeGroupsFromPrep(r.pools, groups, prep)
 	return filtered, func() {
 		matRelease()
 		prepRelease()
@@ -741,7 +731,7 @@ func materializeGroupFromIncluded(pools *rendererPools, g *Group, included *bits
 // tier's capacity (per-group cap for "main", running total cap for
 // "other"), returning the number of circles dropped. This is a last resort
 // for tiles too dense to subdivide further.
-func clipGroupsToTier(groups []Group, tier ShaderConfig) int {
+func clipGroupsToTier(groups []Group, tier ShaderCapacity) int {
 	dropped := 0
 	remainingCircles := tier.OtherCircles
 	remainingBridges := tier.OtherBridges
