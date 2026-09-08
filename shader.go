@@ -10,6 +10,7 @@ import (
 	"text/template"
 
 	"github.com/hajimehoshi/ebiten/v2"
+	"github.com/razzie/ebiten-metaballs/internal/pool"
 )
 
 //go:embed *.kage.tmpl
@@ -145,9 +146,30 @@ func CapacityForGroups(groups []Group) ShaderCapacity {
 	}
 }
 
+// shaderPools recycles the packed-uniform float32 buffers a MetaballShader
+// builds every drawPass, sized once from the shader's fixed ShaderCapacity.
+type shaderPools struct {
+	mainCircles      pool.SlicePool[float32]
+	otherCircles     pool.SlicePool[float32]
+	mainBridgeEnds   pool.SlicePool[float32]
+	mainBridgeRadii  pool.SlicePool[float32]
+	otherBridgeEnds  pool.SlicePool[float32]
+	otherBridgeRadii pool.SlicePool[float32]
+}
+
+func (p *shaderPools) init(capacity ShaderCapacity) {
+	p.mainCircles.Init(capacity.MainCircles * 4)
+	p.otherCircles.Init(capacity.OtherCircles * 4)
+	p.mainBridgeEnds.Init(capacity.MainBridges * 4)
+	p.mainBridgeRadii.Init(capacity.MainBridges * 3)
+	p.otherBridgeEnds.Init(capacity.OtherBridges * 4)
+	p.otherBridgeRadii.Init(capacity.OtherBridges * 3)
+}
+
 type MetaballShader struct {
 	shader *ebiten.Shader
 	config ShaderConfig
+	pools  shaderPools
 }
 
 func NewMetaballShader(config ShaderConfig) (*MetaballShader, error) {
@@ -184,31 +206,45 @@ func NewMetaballShader(config ShaderConfig) (*MetaballShader, error) {
 		return nil, fmt.Errorf("compile metaball shader: %w", err)
 	}
 
-	return &MetaballShader{shader: shader, config: config}, nil
+	ms := &MetaballShader{shader: shader, config: config}
+	ms.pools.init(config.ShaderCapacity)
+	return ms, nil
 }
 
-// packCircles packs circles into vec4(x, y, radius, unused) entries, padded
-// with zero entries up to max so the uniform array length matches the shader.
-func packCircles(circles []Circle, max int) []float32 {
-	out := make([]float32, max*4)
+// packCircles packs circles into vec4(x, y, radius, unused) entries using a
+// pooled buffer, padded with zero entries up to p's default length so the
+// uniform array length matches the shader. release must be called once the
+// returned slice is no longer needed.
+func (s *MetaballShader) packCircles(p *pool.SlicePool[float32], circles []Circle) (out []float32, release func()) {
+	ptr := p.Get()
+	out = *ptr
 
 	for i, c := range circles {
 		out[i*4], out[i*4+1], out[i*4+2] = c.X, c.Y, c.Radius
 	}
 
-	return out
+	return out, func() { p.Put(ptr) }
 }
 
 // packBridges packs bridges into vec4(a.x, a.y, b.x, b.y) ends and
-// vec3(radiusA, radiusMiddle, radiusB) radii, padded up to max.
-func packBridges(circles []Circle, bridges []Bridge, max int) (ends, radii []float32, err error) {
-	ends = make([]float32, max*4)
-	radii = make([]float32, max*3)
+// vec3(radiusA, radiusMiddle, radiusB) radii, using pooled buffers padded up
+// to endsPool/radiiPool's default length. release is non-nil (and must
+// still be called) even when err is returned.
+func (s *MetaballShader) packBridges(endsPool, radiiPool *pool.SlicePool[float32], circles []Circle, bridges []Bridge) (ends, radii []float32, release func(), err error) {
+	endsPtr := endsPool.Get()
+	radiiPtr := radiiPool.Get()
+	release = func() {
+		endsPool.Put(endsPtr)
+		radiiPool.Put(radiiPtr)
+	}
+
+	ends = *endsPtr
+	radii = *radiiPtr
 
 	for i, br := range bridges {
 		if br.A < 0 || br.A >= len(circles) ||
 			br.B < 0 || br.B >= len(circles) {
-			return nil, nil, fmt.Errorf(
+			return nil, nil, release, fmt.Errorf(
 				"invalid bridge indices: %d -> %d",
 				br.A, br.B,
 			)
@@ -221,7 +257,7 @@ func packBridges(circles []Circle, bridges []Bridge, max int) (ends, radii []flo
 		radii[i*3], radii[i*3+1], radii[i*3+2] = a.Radius/2, br.MiddleRadius, b.Radius/2
 	}
 
-	return ends, radii, nil
+	return ends, radii, release, nil
 }
 
 // Draw renders each group in its own pass, using the remaining groups
@@ -284,16 +320,20 @@ func (s *MetaballShader) drawPass(
 
 	w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
 
+	mainCircles, mainCirclesRelease := s.packCircles(&s.pools.mainCircles, main.Circles)
+	defer mainCirclesRelease()
+
 	uniforms := map[string]any{
 		"UvScale":   uvScale[:],
 		"MainColor": []float32{color.R(), color.G(), color.B(), color.A()},
 
 		"MainCircleCount": len(main.Circles),
-		"MainCircles":     packCircles(main.Circles, s.config.MainCircles),
+		"MainCircles":     mainCircles,
 	}
 
 	if s.config.MainBridges > 0 {
-		mainEnds, mainRadii, err := packBridges(main.Circles, main.Bridges, s.config.MainBridges)
+		mainEnds, mainRadii, release, err := s.packBridges(&s.pools.mainBridgeEnds, &s.pools.mainBridgeRadii, main.Circles, main.Bridges)
+		defer release()
 		if err != nil {
 			return err
 		}
@@ -304,12 +344,16 @@ func (s *MetaballShader) drawPass(
 	}
 
 	if s.config.OtherCircles > 0 {
+		otherCircles, otherCirclesRelease := s.packCircles(&s.pools.otherCircles, other.Circles)
+		defer otherCirclesRelease()
+
 		uniforms["OtherCircleCount"] = len(other.Circles)
-		uniforms["OtherCircles"] = packCircles(other.Circles, s.config.OtherCircles)
+		uniforms["OtherCircles"] = otherCircles
 	}
 
 	if s.config.OtherBridges > 0 {
-		otherEnds, otherRadii, err := packBridges(other.Circles, other.Bridges, s.config.OtherBridges)
+		otherEnds, otherRadii, release, err := s.packBridges(&s.pools.otherBridgeEnds, &s.pools.otherBridgeRadii, other.Circles, other.Bridges)
+		defer release()
 		if err != nil {
 			return err
 		}
