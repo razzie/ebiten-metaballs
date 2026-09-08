@@ -10,10 +10,14 @@ type BitSet struct {
 }
 
 func New(n int) *BitSet {
-	return &BitSet{
-		words: make([]uint64, (n+63)/64),
-		n:     n,
-	}
+	b := new(BitSet)
+	b.Init(n)
+	return b
+}
+
+func (b *BitSet) Init(n int) {
+	b.words = make([]uint64, (n+63)/64)
+	b.n = n
 }
 
 func (b *BitSet) Len() int {

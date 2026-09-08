@@ -10,25 +10,26 @@ func mustGroup(circles []Circle, bridges []Bridge) Group {
 	return Group{Circles: circles, Bridges: bridges}
 }
 
-// poolsForGroups returns rendererPools whose default buffer lengths exactly
+// initPoolsForGroups initializes the given rendererPools to have buffer lengths that exactly
 // fit the given groups, for tests that call the filtering/materialization
 // functions directly without a Renderer.
-func poolsForGroups(groups []Group) *rendererPools {
+func initPoolsForGroups(pools *rendererPools, groups []Group) {
 	maxCircles, maxBridges := 0, 0
 	for i := range groups {
 		maxCircles = max(maxCircles, len(groups[i].Circles))
 		maxBridges = max(maxBridges, len(groups[i].Bridges))
 	}
-	return newRendererPools(len(groups), maxCircles, maxBridges)
+	pools.init(len(groups), maxCircles, maxBridges)
 }
 
 // testRenderer builds a bare Renderer for tests that only exercise tile
 // filtering/materialization methods, skipping NewRenderer's shader compilation.
 func testRenderer(groups []Group, smoothK float32) *Renderer {
-	return &Renderer{
-		pools: poolsForGroups(groups),
-		cfg:   RendererConfig{Common: ShaderCommonConfig{SmoothK: smoothK}},
+	r := &Renderer{
+		cfg: RendererConfig{Common: ShaderCommonConfig{SmoothK: smoothK}},
 	}
+	initPoolsForGroups(&r.pools, groups)
+	return r
 }
 
 func TestProbeMaterializeAgree(t *testing.T) {
@@ -120,9 +121,10 @@ func TestFilterCirclesOverlapMixedLarge(t *testing.T) {
 		}
 	}
 
-	pools := newRendererPools(1, n, 0)
+	var pools rendererPools
+	pools.init(1, n, 0)
 	included := bitset.New(n)
-	found := filterCirclesOverlap(pools, circles, tile, included, 0)
+	found := filterCirclesOverlap(&pools, circles, tile, included, 0)
 	if !found {
 		t.Fatalf("expected at least one match")
 	}
@@ -140,7 +142,8 @@ func TestFilterPoolReuseAcrossCalls(t *testing.T) {
 
 	// One Renderer's pools reused across calls with different-sized groups,
 	// so the small group sub-slices the big group's pooled buffers.
-	r := &Renderer{pools: newRendererPools(1, 20, 0)}
+	r := &Renderer{}
+	r.pools.init(1, 20, 0)
 
 	for range 3 {
 		big := mustGroup(make([]Circle, 20), nil)

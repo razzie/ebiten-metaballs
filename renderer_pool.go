@@ -4,71 +4,59 @@ import (
 	"sync"
 
 	"github.com/razzie/ebiten-metaballs/internal/bitset"
+	"github.com/razzie/ebiten-metaballs/internal/pool"
 )
-
-// slicePool recycles slices of T to avoid repeated allocation on the
-// per-tile filtering hot path. All slices in a pool share the pool's fixed
-// default length n: get returns a *[]T with length exactly n (reusing the
-// backing array when possible), so mixed request sizes never trigger a
-// realloc. Callers that need fewer elements take a prefix of the result.
-type slicePool[T any] struct {
-	pool sync.Pool
-	n    int
-}
-
-func newSlicePool[T any](n int) *slicePool[T] {
-	p := &slicePool[T]{n: n}
-	p.pool.New = func() any {
-		s := make([]T, n)
-		return &s
-	}
-	return p
-}
-
-func (p *slicePool[T]) get() *[]T {
-	ptr := p.pool.Get().(*[]T)
-	*ptr = (*ptr)[:p.n]
-	return ptr
-}
-
-func (p *slicePool[T]) put(ptr *[]T) {
-	*ptr = (*ptr)[:0]
-	p.pool.Put(ptr)
-}
-
-// bitsetPool recycles BitSets of a fixed default length n: get always
-// returns a Reset() bitset with Len() == n, so callers never hit the
-// allocate-on-mismatch path that a mixed-length pool would cause.
-type bitsetPool struct {
-	pool sync.Pool
-	n    int
-}
-
-func newBitSetPool(n int) *bitsetPool {
-	p := &bitsetPool{n: n}
-	p.pool.New = func() any { return bitset.New(n) }
-	return p
-}
-
-func (p *bitsetPool) get() *bitset.BitSet {
-	b := p.pool.Get().(*bitset.BitSet)
-	b.Reset()
-	return b
-}
-
-func (p *bitsetPool) put(b *bitset.BitSet) {
-	b.Reset()
-	p.pool.Put(b)
-}
 
 // groupPrep holds the per-group, per-tile included-circle bitset computed
 // once by prepareGroupsForTile and reused by both tier-picking and
 // materializing, instead of recomputing it in each step. included is nil
 // when the group has no survivors for the tile.
 type groupPrep struct {
-	included    *bitset.BitSet
+	included    bitset.BitSet
 	circleCount int
 	bridgeCount int
+}
+
+// groupPrepPool recycles slices of groupPrep, initializing each group's
+// included bitset to the pool's maxCircles. This avoids repeated allocation
+// and bitset initialization on the per-tile filtering hot path.
+type groupPrepPool struct {
+	pool       sync.Pool
+	numGroups  int
+	maxCircles int
+}
+
+func (p *groupPrepPool) init(numGroups, maxCircles int) {
+	p.numGroups = numGroups
+	p.maxCircles = maxCircles
+	p.pool.New = func() any {
+		s := make([]groupPrep, numGroups)
+		for i := range s {
+			s[i].included.Init(maxCircles)
+		}
+		return &s
+	}
+}
+
+func (p *groupPrepPool) get() *[]groupPrep {
+	ptr := p.pool.Get().(*[]groupPrep)
+	if cap(*ptr) < p.numGroups || (*ptr)[:1][0].included.Len() < p.maxCircles {
+		s := make([]groupPrep, p.numGroups)
+		for i := range s {
+			s[i].included.Init(p.maxCircles)
+		}
+		ptr = &s
+	}
+	*ptr = (*ptr)[:p.numGroups]
+	return ptr
+}
+
+func (p *groupPrepPool) put(ptr *[]groupPrep) {
+	for i := range *ptr {
+		(*ptr)[i].included.Reset()
+	}
+	*ptr = (*ptr)[:0]
+	p.pool.Put(ptr)
 }
 
 // rendererPools bundles every scratch pool a Renderer uses on its Draw hot
@@ -77,55 +65,51 @@ type groupPrep struct {
 // Every pool has a fixed default length; ensure grows those defaults
 // (recreating pools) to fit larger inputs, but never shrinks them.
 type rendererPools struct {
-	bitsets  *bitsetPool
-	ints     *slicePool[int]
-	circles  *slicePool[Circle]
-	bridges  *slicePool[Bridge]
-	groups   *slicePool[Group]
-	preps    *slicePool[groupPrep]
-	float32s *slicePool[float32]
-	int32s   *slicePool[int32]
+	ints     pool.SlicePool[int]
+	circles  pool.SlicePool[Circle]
+	bridges  pool.SlicePool[Bridge]
+	groups   pool.SlicePool[Group]
+	preps    groupPrepPool
+	float32s pool.SlicePool[float32]
+	int32s   pool.SlicePool[int32]
+	releases pool.SlicePool[func()]
 }
 
-// newRendererPools creates pools whose default lengths fit up to numGroups
-// groups with up to maxCircles circles / maxBridges bridges each.
-func newRendererPools(numGroups, maxCircles, maxBridges int) *rendererPools {
-	return &rendererPools{
-		bitsets:  newBitSetPool(maxCircles),
-		ints:     newSlicePool[int](maxCircles),
-		circles:  newSlicePool[Circle](maxCircles),
-		bridges:  newSlicePool[Bridge](maxBridges),
-		groups:   newSlicePool[Group](numGroups),
-		preps:    newSlicePool[groupPrep](numGroups),
-		float32s: newSlicePool[float32](maxCircles),
-		int32s:   newSlicePool[int32](simdLaneCount()),
-	}
+func (p *rendererPools) init(numGroups, maxCircles, maxBridges int) {
+	p.ints.Init(maxCircles)
+	p.circles.Init(maxCircles)
+	p.bridges.Init(maxBridges)
+	p.groups.Init(numGroups)
+	p.preps.init(numGroups, maxCircles)
+	p.float32s.Init(maxCircles)
+	p.int32s.Init(simdLaneCount())
+	p.releases.Init(numGroups)
 }
 
 // ensure grows the pools' default lengths to at least the given values,
 // recreating any pool whose current default is too small. Defaults never
 // shrink. Must be called before the pools are used concurrently (Draw calls
-// it before spawning its workers).
+// it before spawning its workers). Concurrent use is not safe.
 func (p *rendererPools) ensure(numGroups, maxCircles, maxBridges int) {
-	if p.bitsets.n < maxCircles {
-		p.bitsets = newBitSetPool(maxCircles)
+	if p.ints.N() < maxCircles {
+		p.ints.Init(maxCircles)
 	}
-	if p.ints.n < maxCircles {
-		p.ints = newSlicePool[int](maxCircles)
+	if p.circles.N() < maxCircles {
+		p.circles.Init(maxCircles)
 	}
-	if p.circles.n < maxCircles {
-		p.circles = newSlicePool[Circle](maxCircles)
+	if p.float32s.N() < maxCircles {
+		p.float32s.Init(maxCircles)
 	}
-	if p.float32s.n < maxCircles {
-		p.float32s = newSlicePool[float32](maxCircles)
+	if p.bridges.N() < maxBridges {
+		p.bridges.Init(maxBridges)
 	}
-	if p.bridges.n < maxBridges {
-		p.bridges = newSlicePool[Bridge](maxBridges)
+	if p.groups.N() < numGroups {
+		p.groups.Init(numGroups)
 	}
-	if p.groups.n < numGroups {
-		p.groups = newSlicePool[Group](numGroups)
+	if p.preps.numGroups < numGroups || p.preps.maxCircles < maxCircles {
+		p.preps.init(numGroups, maxCircles)
 	}
-	if p.preps.n < numGroups {
-		p.preps = newSlicePool[groupPrep](numGroups)
+	if p.releases.N() < numGroups {
+		p.releases.Init(numGroups)
 	}
 }

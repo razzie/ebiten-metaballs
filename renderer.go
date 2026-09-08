@@ -66,7 +66,7 @@ type RendererConfig struct {
 type Renderer struct {
 	cfg     RendererConfig
 	shaders []*MetaballShader
-	pools   *rendererPools
+	pools   rendererPools
 }
 
 // NewRenderer validates cfg and eagerly compiles one shader per tier.
@@ -108,11 +108,12 @@ func NewRenderer(cfg RendererConfig) (*Renderer, error) {
 	poolMaxBridges := max(cfg.PoolMaxBridges, largest.MainBridges)
 	poolMaxGroups := max(cfg.PoolMaxGroups, min(largest.OtherCircles, largest.OtherBridges))
 
-	return &Renderer{
+	r := &Renderer{
 		cfg:     cfg,
 		shaders: shaders,
-		pools:   newRendererPools(poolMaxGroups, poolMaxCircles, poolMaxBridges),
-	}, nil
+	}
+	r.pools.init(poolMaxGroups, poolMaxCircles, poolMaxBridges)
+	return r, nil
 }
 
 // tileBounds is a uv-space rectangle within the visible uv domain.
@@ -357,7 +358,7 @@ func (r *Renderer) processTileParallel(
 		}
 	}
 
-	filtered, matRelease := materializeGroupsFromPrep(r.pools, groups, prep)
+	filtered, matRelease := materializeGroupsFromPrep(&r.pools, groups, prep)
 	release := func() {
 		matRelease()
 		prepRelease()
@@ -445,7 +446,7 @@ func (r *Renderer) drawTile(
 	// Now actually drawing this tile (either a tier fit, or a final
 	// fallback): materialize the filtered circle/bridge data from the
 	// bitsets prepareGroupsForTile already computed above.
-	filtered, matRelease := materializeGroupsFromPrep(r.pools, groups, prep)
+	filtered, matRelease := materializeGroupsFromPrep(&r.pools, groups, prep)
 	defer prepRelease()
 	defer matRelease()
 
@@ -572,9 +573,6 @@ func segmentIntersectsRect(x1, y1, x2, y2 float32, rect tileBounds) bool {
 func (r *Renderer) prepareGroupsForTile(groups []Group, tile tileBounds) (prep []groupPrep, any bool, cap ShaderCapacity, release func()) {
 	prepPtr := r.pools.preps.get()
 	p := (*prepPtr)[:len(groups)]
-	for i := range p {
-		p[i] = groupPrep{} // clear stale bitset pointers from a reused pooled slice
-	}
 
 	for i := range groups {
 		g := &groups[i]
@@ -582,9 +580,8 @@ func (r *Renderer) prepareGroupsForTile(groups []Group, tile tileBounds) (prep [
 			continue
 		}
 
-		included := r.pools.bitsets.get()
-		if !computeIncludedSet(r.pools, g, tile, included, r.cfg.Common.SmoothK) {
-			r.pools.bitsets.put(included)
+		included := &p[i].included
+		if !computeIncludedSet(&r.pools, g, tile, included, r.cfg.Common.SmoothK) {
 			continue
 		}
 
@@ -596,7 +593,8 @@ func (r *Renderer) prepareGroupsForTile(groups []Group, tile tileBounds) (prep [
 			}
 		}
 
-		p[i] = groupPrep{included: included, circleCount: circleCount, bridgeCount: bridgeCount}
+		p[i].circleCount = circleCount
+		p[i].bridgeCount = bridgeCount
 
 		any = true
 		if circleCount > cap.MainCircles {
@@ -610,12 +608,6 @@ func (r *Renderer) prepareGroupsForTile(groups []Group, tile tileBounds) (prep [
 	}
 
 	release = func() {
-		for i := range p {
-			if p[i].included != nil {
-				r.pools.bitsets.put(p[i].included)
-				p[i].included = nil
-			}
-		}
 		r.pools.preps.put(prepPtr)
 	}
 
@@ -650,7 +642,7 @@ func computeIncludedSet(pools *rendererPools, g *Group, tile tileBounds, include
 // avoid recomputing the included bitsets it already has.
 func (r *Renderer) materializeGroupsForTile(groups []Group, tile tileBounds) (filtered []Group, release func()) {
 	prep, _, _, prepRelease := r.prepareGroupsForTile(groups, tile)
-	filtered, matRelease := materializeGroupsFromPrep(r.pools, groups, prep)
+	filtered, matRelease := materializeGroupsFromPrep(&r.pools, groups, prep)
 	return filtered, func() {
 		matRelease()
 		prepRelease()
@@ -664,26 +656,28 @@ func (r *Renderer) materializeGroupsForTile(groups []Group, tile tileBounds) (fi
 // release func (typically via defer) once it's done using the result, e.g.
 // right after the draw call that consumes it.
 func materializeGroupsFromPrep(pools *rendererPools, groups []Group, prep []groupPrep) (filtered []Group, release func()) {
-	filteredPtr := pools.groups.get()
+	filteredPtr := pools.groups.Get()
 	*filteredPtr = (*filteredPtr)[:0]
 
-	borrowed := make([]func(), 0, 2*len(groups)+1)
-	borrowed = append(borrowed, func() { pools.groups.put(filteredPtr) })
+	releasesPtr := pools.releases.Get()
+	*releasesPtr = (*releasesPtr)[:0]
 
 	for i := range groups {
-		if prep[i].included == nil {
+		if !prep[i].included.Any() {
 			continue
 		}
 
-		fg, release := materializeGroupFromIncluded(pools, &groups[i], prep[i].included)
-		borrowed = append(borrowed, release)
+		fg, release := materializeGroupFromIncluded(pools, &groups[i], &prep[i].included)
+		*releasesPtr = append(*releasesPtr, release)
 		*filteredPtr = append(*filteredPtr, fg)
 	}
 
 	return *filteredPtr, func() {
-		for _, r := range borrowed {
+		for _, r := range *releasesPtr {
 			r()
 		}
+		pools.groups.Put(filteredPtr)
+		pools.releases.Put(releasesPtr)
 	}
 }
 
@@ -692,11 +686,11 @@ func materializeGroupsFromPrep(pools *rendererPools, groups []Group, prep []grou
 // computeIncludedSet) plus the remapped bridges whose endpoints both
 // survived.
 func materializeGroupFromIncluded(pools *rendererPools, g *Group, included *bitset.BitSet) (fg Group, release func()) {
-	remapPtr := pools.ints.get()
-	defer pools.ints.put(remapPtr)
+	remapPtr := pools.ints.Get()
+	defer pools.ints.Put(remapPtr)
 	remap := (*remapPtr)[:len(g.Circles)]
 
-	circlesPtr := pools.circles.get()
+	circlesPtr := pools.circles.Get()
 	circles := (*circlesPtr)[:0]
 	for i := range g.Circles {
 		if included.Has(i) {
@@ -708,7 +702,7 @@ func materializeGroupFromIncluded(pools *rendererPools, g *Group, included *bits
 	}
 	*circlesPtr = circles
 
-	bridgesPtr := pools.bridges.get()
+	bridgesPtr := pools.bridges.Get()
 	bridges := (*bridgesPtr)[:0]
 	for _, b := range g.Bridges {
 		na, nb := remap[b.A], remap[b.B]
@@ -720,8 +714,8 @@ func materializeGroupFromIncluded(pools *rendererPools, g *Group, included *bits
 	*bridgesPtr = bridges
 
 	release = func() {
-		pools.circles.put(circlesPtr)
-		pools.bridges.put(bridgesPtr)
+		pools.circles.Put(circlesPtr)
+		pools.bridges.Put(bridgesPtr)
 	}
 
 	return Group{Circles: circles, Bridges: bridges, Color: g.Color}, release

@@ -36,12 +36,12 @@ func filterCirclesOverlap(pools *rendererPools, circles []Circle, tile tileBound
 		return found
 	}
 
-	xsPtr := pools.float32s.get()
-	defer pools.float32s.put(xsPtr)
-	ysPtr := pools.float32s.get()
-	defer pools.float32s.put(ysPtr)
-	rsPtr := pools.float32s.get()
-	defer pools.float32s.put(rsPtr)
+	xsPtr := pools.float32s.Get()
+	defer pools.float32s.Put(xsPtr)
+	ysPtr := pools.float32s.Get()
+	defer pools.float32s.Put(ysPtr)
+	rsPtr := pools.float32s.Get()
+	defer pools.float32s.Put(rsPtr)
 	xs, ys, rs := (*xsPtr)[:n], (*ysPtr)[:n], (*rsPtr)[:n]
 
 	for i, c := range circles {
@@ -53,8 +53,8 @@ func filterCirclesOverlap(pools *rendererPools, circles []Circle, tile tileBound
 	minY := simd.BroadcastFloat32s(tile.MinY)
 	maxY := simd.BroadcastFloat32s(tile.MaxY)
 
-	maskBufPtr := pools.int32s.get()
-	defer pools.int32s.put(maskBufPtr)
+	maskBufPtr := pools.int32s.Get()
+	defer pools.int32s.Put(maskBufPtr)
 	maskBuf := (*maskBufPtr)[:simdLaneCount()]
 
 	found := false
