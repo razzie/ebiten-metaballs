@@ -92,7 +92,13 @@ func NewGame() (*Game, error) {
 	}
 
 	renderer, err := metaballs.NewRenderer(metaballs.RendererConfig{
-		Common:      metaballs.ShaderCommonConfig{SmoothK: smoothK, LightDirX: lightDirX, LightDirY: lightDirY, EdgeThickness: edgeThickness},
+		Common: metaballs.ShaderCommonConfig{
+			SmoothK:       smoothK,
+			LightDirX:     lightDirX,
+			LightDirY:     lightDirY,
+			EdgeThickness: edgeThickness,
+			FxaaEnabled:   true,
+		},
 		Tiers:       tiers,
 		RootCols:    1,
 		RootRows:    1,

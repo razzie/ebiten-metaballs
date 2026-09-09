@@ -1,6 +1,7 @@
 package metaballs
 
 import (
+	"bytes"
 	"fmt"
 	"image"
 	"image/color"
@@ -64,9 +65,11 @@ type RendererConfig struct {
 // Draw is not safe for concurrent use on the same Renderer (the scratch
 // pools grow between frames); use one Renderer per goroutine instead.
 type Renderer struct {
-	cfg     RendererConfig
-	shaders []*MetaballShader
-	pools   rendererPools
+	cfg       RendererConfig
+	shaders   []*MetaballShader
+	pools     rendererPools
+	fxaa      *ebiten.Shader
+	offscreen *ebiten.Image
 }
 
 // NewRenderer validates cfg and eagerly compiles one shader per tier.
@@ -92,7 +95,11 @@ func NewRenderer(cfg RendererConfig) (*Renderer, error) {
 			}
 		}
 
-		shader, err := NewMetaballShader(ShaderConfig{ShaderCapacity: tier, ShaderCommonConfig: cfg.Common})
+		commonCfg := cfg.Common
+		if cfg.Common.FxaaEnabled {
+			commonCfg.rendererFxaaEnabled = true
+		}
+		shader, err := NewMetaballShader(ShaderConfig{ShaderCapacity: tier, ShaderCommonConfig: commonCfg})
 		if err != nil {
 			return nil, fmt.Errorf("compile renderer tier %d: %w", i, err)
 		}
@@ -113,6 +120,20 @@ func NewRenderer(cfg RendererConfig) (*Renderer, error) {
 		shaders: shaders,
 	}
 	r.pools.init(poolMaxGroups, poolMaxCircles, poolMaxBridges)
+
+	if cfg.Common.FxaaEnabled {
+		var fxaaSrc bytes.Buffer
+		if err := kageTemplates.ExecuteTemplate(&fxaaSrc, fxaaShaderTemplate, cfg.Common); err != nil {
+			return nil, fmt.Errorf("generate fxaa shader source: %w", err)
+		}
+
+		fxaaShader, err := ebiten.NewShader(fxaaSrc.Bytes())
+		if err != nil {
+			return nil, fmt.Errorf("compile fxaa shader: %w", err)
+		}
+		r.fxaa = fxaaShader
+	}
+
 	return r, nil
 }
 
@@ -198,33 +219,60 @@ func (r *Renderer) DrawScaled(dst *ebiten.Image, groups []Group, uvScale [2]floa
 		}
 	}
 
+	// FXAA needs the fully-composited image, so all group passes render into
+	// an offscreen buffer first and only the final antialiased result reaches dst.
+	target := dst
+	if r.fxaa != nil {
+		w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
+		target = r.offscreenFor(w, h)
+		target.Clear()
+	}
+
+	var stats Stats
+	var err error
 	total := r.cfg.RootCols * r.cfg.RootRows
 
 	if r.cfg.Workers > 1 {
-		var (
-			workers = r.cfg.Workers
-			stats   Stats
-			g       errgroup.Group
-		)
-		/*if workers > total {
-			workers = total
-		}*/
-		sem := make(chan struct{}, workers)
+		var g errgroup.Group
+		sem := make(chan struct{}, r.cfg.Workers)
 		for idx := 0; idx < total; idx++ {
 			g.Go(func() error {
-				return r.drawTile(dst, xform, groups, rootTile(idx), 0, &stats, sem)
+				return r.drawTile(target, xform, groups, rootTile(idx), 0, &stats, sem)
 			})
 		}
-		return &stats, g.Wait()
+		err = g.Wait()
 	} else {
-		var stats Stats
 		for idx := 0; idx < total; idx++ {
-			if err := r.drawTile(dst, xform, groups, rootTile(idx), 0, &stats, nil); err != nil {
-				return &stats, err
+			if drawErr := r.drawTile(target, xform, groups, rootTile(idx), 0, &stats, nil); drawErr != nil {
+				err = drawErr
+				break
 			}
 		}
-		return &stats, nil
 	}
+
+	if r.fxaa != nil {
+		var transform ebiten.GeoM
+		transform.Translate(float64(xform.scale[0]), float64(xform.scale[1]))
+		w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
+		dst.DrawRectShader(w, h, r.fxaa, &ebiten.DrawRectShaderOptions{
+			GeoM:   transform,
+			Images: [4]*ebiten.Image{target},
+		})
+	}
+
+	return &stats, err
+}
+
+// offscreenFor returns s.offscreen resized (recreated) to (w, h) if needed.
+func (r *Renderer) offscreenFor(w, h int) *ebiten.Image {
+	if r.offscreen != nil && r.offscreen.Bounds().Dx() == w && r.offscreen.Bounds().Dy() == h {
+		return r.offscreen
+	}
+	if r.offscreen != nil {
+		r.offscreen.Deallocate()
+	}
+	r.offscreen = ebiten.NewImage(w, h)
+	return r.offscreen
 }
 
 // uvTransform holds the uv scale (uv units per pixel) and its inverse
@@ -232,17 +280,6 @@ func (r *Renderer) DrawScaled(dst *ebiten.Image, groups []Group, uvScale [2]floa
 // uv-to-pixel conversions stay multiplications.
 type uvTransform struct {
 	scale, invScale [2]float32
-}
-
-type tileDrawTask struct {
-	tile           tileBounds
-	pixelRect      image.Rectangle
-	tierIdx        int
-	filtered       []Group
-	release        func()
-	circlesClipped int
-	hasDraw        bool
-	hasDebug       bool
 }
 
 func (r *Renderer) drawTile(

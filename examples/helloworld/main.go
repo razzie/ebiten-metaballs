@@ -54,8 +54,17 @@ func NewGame() (*Game, error) {
 	}
 
 	shader, err := metaballs.NewMetaballShader(metaballs.ShaderConfig{
-		ShaderCapacity:     metaballs.CapacityForGroups(groups),
-		ShaderCommonConfig: metaballs.ShaderCommonConfig{SmoothK: 0.1, LightDirX: 1, LightDirY: 0, EdgeThickness: 0.04},
+		ShaderCapacity: metaballs.CapacityForGroups(groups),
+		ShaderCommonConfig: metaballs.ShaderCommonConfig{
+			SmoothK:       0.1,
+			LightDirX:     1,
+			LightDirY:     0,
+			EdgeThickness: 0.04,
+			FxaaEnabled:   true,
+			FxaaReduceMin: 128,
+			FxaaReduceMul: 8,
+			FxaaSpanMax:   8,
+		},
 	})
 	if err != nil {
 		return nil, err

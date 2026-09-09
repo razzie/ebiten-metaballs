@@ -18,13 +18,15 @@ import (
 var kageFS embed.FS
 
 var kageTemplates = template.Must(template.New("").Funcs(template.FuncMap{
-	"float": formatKageFloat,
-	"vec2":  formatKageVec2,
+	"float":        formatKageFloat,
+	"floatDefault": formatKageFloatDefault,
+	"vec2":         formatKageVec2,
 }).ParseFS(kageFS, "*.kage.tmpl"))
 
 const (
 	basicShaderTemplate = "shader_basic.kage.tmpl"
 	edgeShaderTemplate  = "shader_edge.kage.tmpl"
+	fxaaShaderTemplate  = "fxaa.kage.tmpl"
 )
 
 // formatKageFloat renders f as a Kage float literal, which requires a decimal point.
@@ -34,6 +36,13 @@ func formatKageFloat(f float32) string {
 		s += ".0"
 	}
 	return s
+}
+
+func formatKageFloatDefault(f float32, d float64) string {
+	if f == 0 {
+		return formatKageFloat(float32(d))
+	}
+	return formatKageFloat(f)
 }
 
 // formatKageVec2 renders x, y as a Kage vec2(...) literal.
@@ -51,14 +60,24 @@ type ShaderCapacity struct {
 	OtherBridges int
 }
 
-// ShaderCommonConfig sets the smooth-min blending radius and edge shading,
-// shared by every capacity tier of a Renderer. LightDirX/LightDirY of
-// (0, 0) disables edge shading entirely (no gradients computed).
+// ShaderCommonConfig holds the common configuration parameters for a shader,
+// including smooth-min blending radius, edge shading, and FXAA settings.
 type ShaderCommonConfig struct {
-	SmoothK       float32
-	LightDirX     float32
-	LightDirY     float32
+	// SmoothK is the smooth-min blending radius for the metaball field. Must be positive.
+	SmoothK float32
+	// Lighting direction for edge shading, normalized to unit length. (0, 0) disables edge shading.
+	LightDirX, LightDirY float32
+	// Edge thickness for the edge shading. Needs light direction to be non-zero. Must be positive.
 	EdgeThickness float32
+	// FxaaEnabled renders all groups to an offscreen buffer and applies FXAA
+	// to it in a final pass to dst. See MetaballShader's doc comment for the
+	// resulting concurrency constraint.
+	FxaaEnabled   bool
+	FxaaReduceMin float32
+	FxaaReduceMul float32
+	FxaaSpanMax   float32
+	// Disables FXAA pass at shader level and enables it on the renderer level instead.
+	rendererFxaaEnabled bool
 }
 
 // ShaderConfig is the full set of compile-time constants for a single
@@ -171,10 +190,16 @@ func (p *shaderPools) init(capacity ShaderCapacity) {
 	}
 }
 
+// MetaballShader renders metaballs and, when FxaaEnabled, post-processes them
+// with FXAA via a single cached offscreen buffer. That buffer is mutable,
+// lazily-(re)sized state, so an FxaaEnabled shader's Draw*/DrawScaledAt calls
+// must not run concurrently on the same instance.
 type MetaballShader struct {
-	shader *ebiten.Shader
-	config ShaderConfig
-	pools  shaderPools
+	shader    *ebiten.Shader
+	fxaa      *ebiten.Shader
+	offscreen *ebiten.Image
+	pools     shaderPools
+	config    ShaderConfig
 }
 
 func NewMetaballShader(config ShaderConfig) (*MetaballShader, error) {
@@ -213,7 +238,33 @@ func NewMetaballShader(config ShaderConfig) (*MetaballShader, error) {
 
 	ms := &MetaballShader{shader: shader, config: config}
 	ms.pools.init(config.ShaderCapacity)
+
+	if config.FxaaEnabled && !config.rendererFxaaEnabled {
+		var fxaaSrc bytes.Buffer
+		if err := kageTemplates.ExecuteTemplate(&fxaaSrc, fxaaShaderTemplate, config); err != nil {
+			return nil, fmt.Errorf("generate fxaa shader source: %w", err)
+		}
+
+		fxaaShader, err := ebiten.NewShader(fxaaSrc.Bytes())
+		if err != nil {
+			return nil, fmt.Errorf("compile fxaa shader: %w", err)
+		}
+		ms.fxaa = fxaaShader
+	}
+
 	return ms, nil
+}
+
+// offscreenFor returns s.offscreen resized (recreated) to (w, h) if needed.
+func (s *MetaballShader) offscreenFor(w, h int) *ebiten.Image {
+	if s.offscreen != nil && s.offscreen.Bounds().Dx() == w && s.offscreen.Bounds().Dy() == h {
+		return s.offscreen
+	}
+	if s.offscreen != nil {
+		s.offscreen.Deallocate()
+	}
+	s.offscreen = ebiten.NewImage(w, h)
+	return s.offscreen
 }
 
 // packCircles packs circles into vec4(x, y, radius, unused) entries using a
@@ -273,12 +324,31 @@ func (s *MetaballShader) DrawScaledAt(dst *ebiten.Image, groups []Group, uvScale
 		return fmt.Errorf("uv scale must be positive: %v", uvScale)
 	}
 
+	// FXAA needs the fully-composited image, so all group passes render into
+	// an offscreen buffer first and only the final antialiased result reaches dst.
+	target := dst
+	if s.fxaa != nil {
+		w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
+		target = s.offscreenFor(w, h)
+		target.Clear()
+	}
+
 	for i, g := range groups {
 		other := combineGroups(groups, i)
 
-		if err := s.drawPass(dst, g, other, g.Color, uvScale, origin); err != nil {
+		if err := s.drawPass(target, g, other, g.Color, uvScale, origin); err != nil {
 			return err
 		}
+	}
+
+	if s.fxaa != nil {
+		var transform ebiten.GeoM
+		transform.Translate(float64(origin[0]), float64(origin[1]))
+		w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
+		dst.DrawRectShader(w, h, s.fxaa, &ebiten.DrawRectShaderOptions{
+			GeoM:   transform,
+			Images: [4]*ebiten.Image{target},
+		})
 	}
 
 	return nil

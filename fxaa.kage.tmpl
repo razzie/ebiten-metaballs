@@ -1,0 +1,79 @@
+//kage:unit pixels
+
+package main
+
+const (
+	fxaaReduceMin = 1.0 / {{floatDefault .FxaaReduceMin 128.0}}
+	fxaaReduceMul = 1.0 / {{floatDefault .FxaaReduceMul 8.0}}
+	fxaaSpanMax   = {{floatDefault .FxaaSpanMax 8.0}}
+)
+
+func luma(c vec3) float {
+	// Cheap perceptual luminance approximation.
+	return dot(c, vec3(0.299, 0.587, 0.114))
+}
+
+func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
+	// Center + diagonal neighbours.
+	rgbM := imageSrc0At(srcPos).rgb
+
+	rgbNW := imageSrc0At(srcPos + vec2(-1, -1)).rgb
+	rgbNE := imageSrc0At(srcPos + vec2( 1, -1)).rgb
+	rgbSW := imageSrc0At(srcPos + vec2(-1,  1)).rgb
+	rgbSE := imageSrc0At(srcPos + vec2( 1,  1)).rgb
+
+	lumaM  := luma(rgbM)
+	lumaNW := luma(rgbNW)
+	lumaNE := luma(rgbNE)
+	lumaSW := luma(rgbSW)
+	lumaSE := luma(rgbSE)
+
+	lumaMin := min(
+		lumaM,
+		min(min(lumaNW, lumaNE), min(lumaSW, lumaSE)),
+	)
+
+	lumaMax := max(
+		lumaM,
+		max(max(lumaNW, lumaNE), max(lumaSW, lumaSE)),
+	)
+
+	// Estimate the edge direction.
+	dir := vec2(
+		-((lumaNW + lumaNE) - (lumaSW + lumaSE)),
+		 ((lumaNW + lumaSW) - (lumaNE + lumaSE)),
+	)
+
+	lumaSum := lumaNW + lumaNE + lumaSW + lumaSE
+
+	dirReduce := max(
+		lumaSum * (0.25 * fxaaReduceMul),
+		fxaaReduceMin,
+	)
+
+	rcpDirMin := 1.0 / (min(abs(dir.x), abs(dir.y)) + dirReduce)
+
+	dir = clamp(
+		dir * rcpDirMin,
+		vec2(-fxaaSpanMax),
+		vec2(fxaaSpanMax),
+	)
+
+	// First candidate: two samples close to the edge centre.
+	rgbA := 0.5 * (
+		imageSrc0At(srcPos + dir*(1.0/3.0-0.5)).rgb +
+		imageSrc0At(srcPos + dir*(2.0/3.0-0.5)).rgb)
+
+	// Second candidate: extend further along the edge.
+	rgbB := rgbA*0.5 + 0.25*(
+		imageSrc0At(srcPos + dir*(0.0/3.0-0.5)).rgb +
+		imageSrc0At(srcPos + dir*(3.0/3.0-0.5)).rgb)
+
+	lumaB := luma(rgbB)
+
+	if lumaB < lumaMin || lumaB > lumaMax {
+		return vec4(rgbA, 1)
+	}
+
+	return vec4(rgbB, 1)
+}
