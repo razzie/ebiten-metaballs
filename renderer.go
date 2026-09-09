@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	"sync"
 	"sync/atomic"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/vector"
 	"github.com/razzie/ebiten-metaballs/internal/bitset"
+	"golang.org/x/sync/errgroup"
 )
 
 // RendererConfig configures a Renderer: a pool of shaders for different
@@ -136,9 +136,9 @@ func (t tileBounds) size() (float32, float32) {
 
 // Stats reports how much work the last Draw call actually performed.
 type Stats struct {
-	TilesDrawn     int
-	TilesSkipped   int
-	CirclesClipped int
+	TilesDrawn     atomic.Int32
+	TilesSkipped   atomic.Int32
+	CirclesClipped atomic.Int32
 }
 
 // Draw renders groups by planning a tile grid over dst and drawing only the
@@ -146,7 +146,7 @@ type Stats struct {
 // space is normalized against dst's own size (uv scale = 1/size), i.e. the
 // canvas covers [0,1]x[0,1] in uv space; on non-square canvases circles
 // stretch with the aspect ratio - use DrawScaled to avoid that.
-func (r *Renderer) Draw(dst *ebiten.Image, groups []Group) (Stats, error) {
+func (r *Renderer) Draw(dst *ebiten.Image, groups []Group) (*Stats, error) {
 	w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
 	return r.DrawScaled(dst, groups, [2]float32{1 / float32(w), 1 / float32(h)})
 }
@@ -157,9 +157,9 @@ func (r *Renderer) Draw(dst *ebiten.Image, groups []Group) (Stats, error) {
 // it. A uniform scale keeps circles circular regardless of aspect ratio:
 // e.g. {1/h, 1/h} maps the canvas to [0, w/h]x[0, 1] in uv space. Both scale
 // components must be positive.
-func (r *Renderer) DrawScaled(dst *ebiten.Image, groups []Group, uvScale [2]float32) (Stats, error) {
+func (r *Renderer) DrawScaled(dst *ebiten.Image, groups []Group, uvScale [2]float32) (*Stats, error) {
 	if uvScale[0] <= 0 || uvScale[1] <= 0 {
-		return Stats{}, fmt.Errorf("renderer: uv scale must be positive: %v", uvScale)
+		return nil, fmt.Errorf("renderer: uv scale must be positive: %v", uvScale)
 	}
 
 	xform := uvTransform{
@@ -200,17 +200,31 @@ func (r *Renderer) DrawScaled(dst *ebiten.Image, groups []Group, uvScale [2]floa
 
 	total := r.cfg.RootCols * r.cfg.RootRows
 
-	if r.cfg.Workers <= 1 {
+	if r.cfg.Workers > 1 {
+		var (
+			workers = r.cfg.Workers
+			stats   Stats
+			g       errgroup.Group
+		)
+		/*if workers > total {
+			workers = total
+		}*/
+		sem := make(chan struct{}, workers)
+		for idx := 0; idx < total; idx++ {
+			g.Go(func() error {
+				return r.drawTile(dst, xform, groups, rootTile(idx), 0, &stats, sem)
+			})
+		}
+		return &stats, g.Wait()
+	} else {
 		var stats Stats
 		for idx := 0; idx < total; idx++ {
-			if err := r.drawTile(dst, xform, groups, rootTile(idx), 0, &stats); err != nil {
-				return stats, err
+			if err := r.drawTile(dst, xform, groups, rootTile(idx), 0, &stats, nil); err != nil {
+				return &stats, err
 			}
 		}
-		return stats, nil
+		return &stats, nil
 	}
-
-	return r.drawParallel(dst, xform, groups, rootTile, total)
 }
 
 // uvTransform holds the uv scale (uv units per pixel) and its inverse
@@ -231,166 +245,6 @@ type tileDrawTask struct {
 	hasDebug       bool
 }
 
-// drawParallel distributes CPU filtering (probing, subdivision, group
-// materialization) across cfg.Workers goroutines. Materialized draw tasks
-// are pushed to a channel and consumed sequentially on the calling
-// goroutine to execute all Ebiten draw calls.
-func (r *Renderer) drawParallel(
-	dst *ebiten.Image,
-	xform uvTransform,
-	groups []Group,
-	rootTile func(int) tileBounds,
-	total int,
-) (Stats, error) {
-	workers := r.cfg.Workers
-	if workers > total {
-		workers = total
-	}
-
-	var (
-		tilesSkipped atomic.Int64
-		nextIdx      atomic.Int64
-		wg           sync.WaitGroup
-	)
-
-	taskChan := make(chan tileDrawTask, workers*16)
-
-	wg.Add(workers)
-	for w := 0; w < workers; w++ {
-		go func() {
-			defer wg.Done()
-
-			var localSkipped int
-			for {
-				idx := int(nextIdx.Add(1)) - 1
-				if idx >= total {
-					break
-				}
-
-				r.processTileParallel(xform, groups, rootTile(idx), 0, taskChan, &localSkipped)
-			}
-
-			tilesSkipped.Add(int64(localSkipped))
-		}()
-	}
-
-	go func() {
-		wg.Wait()
-		close(taskChan)
-	}()
-
-	var (
-		stats    Stats
-		firstErr error
-	)
-
-	for task := range taskChan {
-		if task.hasDraw && firstErr == nil {
-			sub, ok := dst.SubImage(task.pixelRect).(*ebiten.Image)
-			if !ok {
-				firstErr = fmt.Errorf("renderer: SubImage did not return *ebiten.Image")
-			} else {
-				origin := [2]float32{float32(task.pixelRect.Min.X), float32(task.pixelRect.Min.Y)}
-				if err := r.shaders[task.tierIdx].DrawScaledAt(sub, task.filtered, xform.scale, origin); err != nil {
-					firstErr = err
-				} else {
-					stats.TilesDrawn++
-					stats.CirclesClipped += task.circlesClipped
-				}
-			}
-		}
-
-		if task.hasDebug && firstErr == nil {
-			r.drawDebugOutline(dst, xform, task.tile)
-		}
-
-		if task.release != nil {
-			task.release()
-		}
-	}
-
-	stats.TilesSkipped = int(tilesSkipped.Load())
-	return stats, firstErr
-}
-
-func (r *Renderer) processTileParallel(
-	xform uvTransform,
-	groups []Group,
-	tile tileBounds,
-	depth int,
-	taskChan chan<- tileDrawTask,
-	tilesSkipped *int,
-) {
-	prep, any, cap, prepRelease := r.prepareGroupsForTile(groups, tile)
-
-	if !any {
-		prepRelease()
-		*tilesSkipped++
-		return
-	}
-
-	tierIdx := r.pickTier(cap)
-
-	if tierIdx < 0 {
-		tw, th := tile.size()
-
-		if depth < r.cfg.MaxDepth && tw > 2*r.cfg.MinTileSize && th > 2*r.cfg.MinTileSize {
-			prepRelease()
-
-			midX := (tile.MinX + tile.MaxX) / 2
-			midY := (tile.MinY + tile.MaxY) / 2
-
-			children := [4]tileBounds{
-				{tile.MinX, tile.MinY, midX, midY},
-				{midX, tile.MinY, tile.MaxX, midY},
-				{tile.MinX, midY, midX, tile.MaxY},
-				{midX, midY, tile.MaxX, tile.MaxY},
-			}
-
-			for _, child := range children {
-				r.processTileParallel(xform, groups, child, depth+1, taskChan, tilesSkipped)
-			}
-
-			if r.cfg.Debug {
-				taskChan <- tileDrawTask{tile: tile, hasDebug: true}
-			}
-			return
-		}
-	}
-
-	filtered, matRelease := materializeGroupsFromPrep(&r.pools, groups, prep)
-	release := func() {
-		matRelease()
-		prepRelease()
-	}
-
-	clipped := 0
-	if tierIdx < 0 {
-		tierIdx = len(r.shaders) - 1
-		clipped = clipGroupsToTier(filtered, r.cfg.Tiers[tierIdx])
-	}
-
-	pixelRect := tileToPixelRect(tile, xform.invScale)
-	if pixelRect.Dx() <= 0 || pixelRect.Dy() <= 0 {
-		release()
-		if r.cfg.Debug {
-			taskChan <- tileDrawTask{tile: tile, hasDebug: true}
-		}
-		return
-	}
-
-	taskChan <- tileDrawTask{
-		tile:           tile,
-		pixelRect:      pixelRect,
-		tierIdx:        tierIdx,
-		filtered:       filtered,
-		release:        release,
-		circlesClipped: clipped,
-		hasDraw:        true,
-		hasDebug:       r.cfg.Debug,
-	}
-}
-
 func (r *Renderer) drawTile(
 	dst *ebiten.Image,
 	xform uvTransform,
@@ -398,7 +252,13 @@ func (r *Renderer) drawTile(
 	tile tileBounds,
 	depth int,
 	stats *Stats,
+	sem chan struct{},
 ) error {
+	if sem != nil {
+		sem <- struct{}{}
+		defer func() { <-sem }()
+	}
+
 	// Cheap counting pass: decides tier/subdivision without materializing
 	// any filtered circle/bridge data, since that's thrown away whenever
 	// the tile ends up subdividing instead of drawing.
@@ -406,7 +266,7 @@ func (r *Renderer) drawTile(
 
 	if !any {
 		prepRelease()
-		stats.TilesSkipped++
+		stats.TilesSkipped.Add(1)
 		return nil
 	}
 
@@ -434,7 +294,7 @@ func (r *Renderer) drawTile(
 			}
 
 			for _, child := range children {
-				if err := r.drawTile(dst, xform, groups, child, depth+1, stats); err != nil {
+				if err := r.drawTile(dst, xform, groups, child, depth+1, stats, sem); err != nil {
 					return err
 				}
 			}
@@ -454,7 +314,7 @@ func (r *Renderer) drawTile(
 		// Can't subdivide further: fall back to the largest tier and clip.
 		tierIdx = len(r.shaders) - 1
 		clipped := clipGroupsToTier(filtered, r.cfg.Tiers[tierIdx])
-		stats.CirclesClipped += clipped
+		stats.CirclesClipped.Add(int32(clipped))
 	}
 
 	pixelRect := tileToPixelRect(tile, xform.invScale)
@@ -472,7 +332,7 @@ func (r *Renderer) drawTile(
 		return err
 	}
 
-	stats.TilesDrawn++
+	stats.TilesDrawn.Add(1)
 	return nil
 }
 

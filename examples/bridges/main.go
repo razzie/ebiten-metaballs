@@ -69,7 +69,7 @@ type Game struct {
 	renderer *metaballs.Renderer
 	groups   []movingGroup
 
-	lastStats metaballs.Stats
+	lastStats *metaballs.Stats
 }
 
 func randRange(min, max float32) float32 {
@@ -177,7 +177,11 @@ func NewGame() (*Game, error) {
 		return nil, err
 	}
 
-	return &Game{renderer: renderer, groups: groups}, nil
+	return &Game{
+		renderer:  renderer,
+		groups:    groups,
+		lastStats: new(metaballs.Stats),
+	}, nil
 }
 
 func (g *Game) Update() error {
@@ -260,8 +264,8 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		"FPS: %0.1f  TPS: %0.1f\ncircles: %d\ntiles drawn: %d  skipped: %d\ncircles clipped: %d",
 		ebiten.ActualFPS(), ebiten.ActualTPS(),
 		totalCircles,
-		g.lastStats.TilesDrawn, g.lastStats.TilesSkipped,
-		g.lastStats.CirclesClipped,
+		g.lastStats.TilesDrawn.Load(), g.lastStats.TilesSkipped.Load(),
+		g.lastStats.CirclesClipped.Load(),
 	))
 }
 

@@ -19,7 +19,7 @@ const (
 
 	circlesPerGroup = 170 // ~500 circles total across 3 groups
 	minRadius       = 0.01
-	maxRadius       = 0.02
+	maxRadius       = 0.03
 	minSpeed        = 0.025
 	maxSpeed        = 0.1
 
@@ -42,7 +42,7 @@ type Game struct {
 	renderer *metaballs.Renderer
 	groups   []movingGroup
 
-	lastStats metaballs.Stats
+	lastStats *metaballs.Stats
 }
 
 func randRange(min, max float32) float32 {
@@ -87,8 +87,8 @@ func NewGame() (*Game, error) {
 	// Capacity tiers: shader pool from small (cheap, common case for sparse
 	// tiles) up to large (rare, dense tiles after subdivision).
 	tiers := []metaballs.ShaderCapacity{
-		{MainCircles: 16, OtherCircles: 16},
 		{MainCircles: 32, OtherCircles: 32},
+		{MainCircles: 64, OtherCircles: 64},
 	}
 
 	renderer, err := metaballs.NewRenderer(metaballs.RendererConfig{
@@ -105,7 +105,11 @@ func NewGame() (*Game, error) {
 		return nil, err
 	}
 
-	return &Game{renderer: renderer, groups: groups}, nil
+	return &Game{
+		renderer:  renderer,
+		groups:    groups,
+		lastStats: new(metaballs.Stats),
+	}, nil
 }
 
 func (g *Game) Update() error {
@@ -150,7 +154,9 @@ func (g *Game) Draw(screen *ebiten.Image) {
 
 	stats, err := g.renderer.Draw(screen, groups)
 	if err != nil {
-		panic(err)
+		//panic(err)
+		ebitenutil.DebugPrint(screen, err.Error())
+		return
 	}
 	g.lastStats = stats
 
@@ -163,8 +169,8 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		"FPS: %0.1f  TPS: %0.1f\ncircles: %d\ntiles drawn: %d  skipped: %d\ncircles clipped: %d",
 		ebiten.ActualFPS(), ebiten.ActualTPS(),
 		totalCircles,
-		g.lastStats.TilesDrawn, g.lastStats.TilesSkipped,
-		g.lastStats.CirclesClipped,
+		g.lastStats.TilesDrawn.Load(), g.lastStats.TilesSkipped.Load(),
+		g.lastStats.CirclesClipped.Load(),
 	))
 }
 
