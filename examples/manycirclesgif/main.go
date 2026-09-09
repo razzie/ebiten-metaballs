@@ -2,14 +2,13 @@ package main
 
 import (
 	"image"
-	"image/color/palette"
+	"image/color"
 	"image/draw"
 	"image/gif"
 	"log"
 	"math"
-	"math/rand"
+	mrand "math/rand"
 	"os"
-	"time"
 
 	metaballs "github.com/razzie/ebiten-metaballs"
 
@@ -17,6 +16,8 @@ import (
 )
 
 const (
+	seed = 123456789
+
 	canvasSize      = 384
 	fps             = 20
 	durationSeconds = 5
@@ -43,6 +44,21 @@ type vec2 struct{ X, Y float32 }
 type movingGroup struct {
 	group      metaballs.Group
 	velocities []vec2
+}
+
+var rand = mrand.New(mrand.NewSource(seed))
+
+var gifPalette = []color.Color{
+	color.Transparent,
+	color.RGBA{R: 192, G: 0, B: 0, A: 255},
+	color.RGBA{R: 224, G: 0, B: 0, A: 255},
+	color.RGBA{R: 255, G: 0, B: 0, A: 255},
+	color.RGBA{R: 0, G: 192, B: 0, A: 255},
+	color.RGBA{R: 0, G: 224, B: 0, A: 255},
+	color.RGBA{R: 0, G: 255, B: 0, A: 255},
+	color.RGBA{R: 0, G: 0, B: 192, A: 255},
+	color.RGBA{R: 0, G: 0, B: 224, A: 255},
+	color.RGBA{R: 0, G: 0, B: 255, A: 255},
 }
 
 func randRange(min, max float32) float32 {
@@ -148,7 +164,9 @@ func NewGame() (*Game, error) {
 // capture renders frameCount frames, encodes them as an animated GIF at
 // outputPath, and exits the process.
 func (g *Game) capture() {
-	anim := &gif.GIF{}
+	anim := &gif.GIF{
+		BackgroundIndex: 0,
+	}
 	pix := make([]byte, 4*canvasSize*canvasSize)
 	rect := image.Rect(0, 0, canvasSize, canvasSize)
 
@@ -168,11 +186,12 @@ func (g *Game) capture() {
 		g.offscreen.ReadPixels(pix)
 		rgba := &image.RGBA{Pix: pix, Stride: 4 * canvasSize, Rect: rect}
 
-		paletted := image.NewPaletted(rect, palette.Plan9)
+		paletted := image.NewPaletted(rect, gifPalette)
 		draw.Draw(paletted, rect, rgba, image.Point{}, draw.Src)
 
 		anim.Image = append(anim.Image, paletted)
 		anim.Delay = append(anim.Delay, gifDelay)
+		anim.Disposal = append(anim.Disposal, gif.DisposalBackground)
 	}
 
 	f, err := os.Create(outputPath)
@@ -208,8 +227,6 @@ func (g *Game) Layout(outsideWidth, outsideHeight int) (int, int) {
 }
 
 func main() {
-	rand.Seed(time.Now().UnixNano())
-
 	game, err := NewGame()
 	if err != nil {
 		log.Fatal(err)
