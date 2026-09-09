@@ -2,7 +2,7 @@
 
 `ebiten-metaballs` is a Go package for rendering 2D metaballs with Ebiten v2. Metaballs are defined as circles, with optional bridges between circle pairs. Groups provide independent colors; each group is rendered as a main field while the other groups drive the squeezing/intersection field.
 
-![Many circles](examples/manycirclesgif/manycircles.gif)
+![Demo GIF](examples/demogif/demo.gif)
 
 ## Requirements
 
@@ -127,7 +127,7 @@ stats, err := renderer.Draw(dst, groups)
 - `MaxDepth`: maximum number of four-way subdivisions below the root grid.
 - `MinTileSize`: minimum UV width and height for subdivision.
 - `Debug`: draws tile outlines for skipped, subdivided, and rendered tiles.
-- `Workers`: number of CPU workers for filtering and tile planning. Values `0` and `1` are serial. Ebiten draw calls remain serialized.
+- `Workers`: number of CPU workers for filtering, tile planning and draw calls. Values `0` and `1` are serial.
 - `PoolMaxCircles`, `PoolMaxBridges`, `PoolMaxGroups`: optional initial scratch-pool sizes. Pools grow as needed and never shrink.
 
 `DrawScaled(dst, groups, uvScale)` is the renderer equivalent of `MetaballShader.DrawScaled`. The visible UV domain is the destination pixel dimensions multiplied by `uvScale`. Both scale components must be positive.
@@ -153,5 +153,5 @@ go run ./examples/bridges
 
 - `helloworld` uses `MetaballShader` directly.
 - `manycircles` demonstrates renderer tiling with many moving circles.
-- `manycirclesgif` demonstrates moving clustered circles and bridges; its captured output is shown above.
-- `bridges` demonstrates explicit circle connections.
+- `demogif` renders moving clustered circles to gif; its captured output is shown above.
+- `bridges` demonstrates moving clustered circles and bridges.
