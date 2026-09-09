@@ -7,6 +7,11 @@ import (
 	"github.com/razzie/ebiten-metaballs/internal/pool"
 )
 
+type materializeBuffers struct {
+	circlesPtr *[]Circle
+	bridgesPtr *[]Bridge
+}
+
 // groupPrep holds the per-group, per-tile included-circle bitset computed
 // once by prepareGroupsForTile and reused by both tier-picking and
 // materializing, instead of recomputing it in each step. included is nil
@@ -65,14 +70,14 @@ func (p *groupPrepPool) put(ptr *[]groupPrep) {
 // Every pool has a fixed default length; ensure grows those defaults
 // (recreating pools) to fit larger inputs, but never shrinks them.
 type rendererPools struct {
-	ints     pool.SlicePool[int]
-	circles  pool.SlicePool[Circle]
-	bridges  pool.SlicePool[Bridge]
-	groups   pool.SlicePool[Group]
-	preps    groupPrepPool
-	float32s pool.SlicePool[float32]
-	int32s   pool.SlicePool[int32]
-	releases pool.SlicePool[func()]
+	ints        pool.SlicePool[int]
+	circles     pool.SlicePool[Circle]
+	bridges     pool.SlicePool[Bridge]
+	groups      pool.SlicePool[Group]
+	preps       groupPrepPool
+	float32s    pool.SlicePool[float32]
+	int32s      pool.SlicePool[int32]
+	materialize pool.SlicePool[materializeBuffers]
 }
 
 func (p *rendererPools) init(numGroups, maxCircles, maxBridges int) {
@@ -83,7 +88,7 @@ func (p *rendererPools) init(numGroups, maxCircles, maxBridges int) {
 	p.preps.init(numGroups, maxCircles)
 	p.float32s.Init(maxCircles)
 	p.int32s.Init(simdLaneCount())
-	p.releases.Init(numGroups)
+	p.materialize.Init(numGroups)
 }
 
 // ensure grows the pools' default lengths to at least the given values,
@@ -109,7 +114,7 @@ func (p *rendererPools) ensure(numGroups, maxCircles, maxBridges int) {
 	if p.preps.numGroups < numGroups || p.preps.maxCircles < maxCircles {
 		p.preps.init(numGroups, maxCircles)
 	}
-	if p.releases.N() < numGroups {
-		p.releases.Init(numGroups)
+	if p.materialize.N() < numGroups {
+		p.materialize.Init(numGroups)
 	}
 }

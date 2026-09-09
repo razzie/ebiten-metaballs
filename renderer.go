@@ -656,28 +656,36 @@ func (r *Renderer) materializeGroupsForTile(groups []Group, tile tileBounds) (fi
 // release func (typically via defer) once it's done using the result, e.g.
 // right after the draw call that consumes it.
 func materializeGroupsFromPrep(pools *rendererPools, groups []Group, prep []groupPrep) (filtered []Group, release func()) {
-	filteredPtr := pools.groups.Get()
-	*filteredPtr = (*filteredPtr)[:0]
+	groupsPtr := pools.groups.Get()
+	*groupsPtr = (*groupsPtr)[:0]
 
-	releasesPtr := pools.releases.Get()
-	*releasesPtr = (*releasesPtr)[:0]
+	materializeBuffersPtr := pools.materialize.Get()
+	*materializeBuffersPtr = (*materializeBuffersPtr)[:0]
+
+	remapPtr := pools.ints.Get()
+	defer pools.ints.Put(remapPtr)
 
 	for i := range groups {
 		if !prep[i].included.Any() {
 			continue
 		}
 
-		fg, release := materializeGroupFromIncluded(pools, &groups[i], &prep[i].included)
-		*releasesPtr = append(*releasesPtr, release)
-		*filteredPtr = append(*filteredPtr, fg)
+		buffers := materializeBuffers{
+			circlesPtr: pools.circles.Get(),
+			bridgesPtr: pools.bridges.Get(),
+		}
+		filteredGroup := materializeGroupFromIncluded(remapPtr, buffers.circlesPtr, buffers.bridgesPtr, &groups[i], &prep[i].included)
+		*groupsPtr = append(*groupsPtr, filteredGroup)
+		*materializeBuffersPtr = append(*materializeBuffersPtr, buffers)
 	}
 
-	return *filteredPtr, func() {
-		for _, r := range *releasesPtr {
-			r()
+	return *groupsPtr, func() {
+		for _, r := range *materializeBuffersPtr {
+			pools.circles.Put(r.circlesPtr)
+			pools.bridges.Put(r.bridgesPtr)
 		}
-		pools.groups.Put(filteredPtr)
-		pools.releases.Put(releasesPtr)
+		pools.groups.Put(groupsPtr)
+		pools.materialize.Put(materializeBuffersPtr)
 	}
 }
 
@@ -685,12 +693,9 @@ func materializeGroupsFromPrep(pools *rendererPools, groups []Group, prep []grou
 // marked in included (computed by prepareGroupsForTile via
 // computeIncludedSet) plus the remapped bridges whose endpoints both
 // survived.
-func materializeGroupFromIncluded(pools *rendererPools, g *Group, included *bitset.BitSet) (fg Group, release func()) {
-	remapPtr := pools.ints.Get()
-	defer pools.ints.Put(remapPtr)
+func materializeGroupFromIncluded(remapPtr *[]int, circlesPtr *[]Circle, bridgesPtr *[]Bridge, g *Group, included *bitset.BitSet) Group {
 	remap := (*remapPtr)[:len(g.Circles)]
 
-	circlesPtr := pools.circles.Get()
 	circles := (*circlesPtr)[:0]
 	for i := range g.Circles {
 		if included.Has(i) {
@@ -702,7 +707,6 @@ func materializeGroupFromIncluded(pools *rendererPools, g *Group, included *bits
 	}
 	*circlesPtr = circles
 
-	bridgesPtr := pools.bridges.Get()
 	bridges := (*bridgesPtr)[:0]
 	for _, b := range g.Bridges {
 		na, nb := remap[b.A], remap[b.B]
@@ -713,12 +717,7 @@ func materializeGroupFromIncluded(pools *rendererPools, g *Group, included *bits
 	}
 	*bridgesPtr = bridges
 
-	release = func() {
-		pools.circles.Put(circlesPtr)
-		pools.bridges.Put(bridgesPtr)
-	}
-
-	return Group{Circles: circles, Bridges: bridges, Color: g.Color}, release
+	return Group{Circles: circles, Bridges: bridges, Color: g.Color}
 }
 
 // clipGroupsToTier truncates each group's circles/bridges in place to fit

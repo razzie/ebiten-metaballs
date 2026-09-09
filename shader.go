@@ -7,6 +7,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"sync"
 	"text/template"
 
 	"github.com/hajimehoshi/ebiten/v2"
@@ -155,6 +156,7 @@ type shaderPools struct {
 	mainBridgeRadii  pool.SlicePool[float32]
 	otherBridgeEnds  pool.SlicePool[float32]
 	otherBridgeRadii pool.SlicePool[float32]
+	uniforms         sync.Pool // map[string]any
 }
 
 func (p *shaderPools) init(capacity ShaderCapacity) {
@@ -164,6 +166,9 @@ func (p *shaderPools) init(capacity ShaderCapacity) {
 	p.mainBridgeRadii.Init(capacity.MainBridges * 3)
 	p.otherBridgeEnds.Init(capacity.OtherBridges * 4)
 	p.otherBridgeRadii.Init(capacity.OtherBridges * 3)
+	p.uniforms.New = func() any {
+		return make(map[string]any)
+	}
 }
 
 type MetaballShader struct {
@@ -215,49 +220,31 @@ func NewMetaballShader(config ShaderConfig) (*MetaballShader, error) {
 // pooled buffer, padded with zero entries up to p's default length so the
 // uniform array length matches the shader. release must be called once the
 // returned slice is no longer needed.
-func (s *MetaballShader) packCircles(p *pool.SlicePool[float32], circles []Circle) (out []float32, release func()) {
-	ptr := p.Get()
-	out = *ptr
-
+func (s *MetaballShader) packCircles(out *[]float32, circles []Circle) {
 	for i, c := range circles {
-		out[i*4], out[i*4+1], out[i*4+2] = c.X, c.Y, c.Radius
+		(*out)[i*4], (*out)[i*4+1], (*out)[i*4+2] = c.X, c.Y, c.Radius
 	}
-
-	return out, func() { p.Put(ptr) }
 }
 
 // packBridges packs bridges into vec4(a.x, a.y, b.x, b.y) ends and
 // vec3(radiusA, radiusMiddle, radiusB) radii, using pooled buffers padded up
 // to endsPool/radiiPool's default length. release is non-nil (and must
 // still be called) even when err is returned.
-func (s *MetaballShader) packBridges(endsPool, radiiPool *pool.SlicePool[float32], circles []Circle, bridges []Bridge) (ends, radii []float32, release func(), err error) {
-	endsPtr := endsPool.Get()
-	radiiPtr := radiiPool.Get()
-	release = func() {
-		endsPool.Put(endsPtr)
-		radiiPool.Put(radiiPtr)
-	}
-
-	ends = *endsPtr
-	radii = *radiiPtr
-
+func (s *MetaballShader) packBridges(ends, radii *[]float32, circles []Circle, bridges []Bridge) (err error) {
 	for i, br := range bridges {
 		if br.A < 0 || br.A >= len(circles) ||
 			br.B < 0 || br.B >= len(circles) {
-			return nil, nil, release, fmt.Errorf(
-				"invalid bridge indices: %d -> %d",
-				br.A, br.B,
-			)
+			return fmt.Errorf("invalid bridge indices: %d -> %d", br.A, br.B)
 		}
 
 		a := circles[br.A]
 		b := circles[br.B]
 
-		ends[i*4], ends[i*4+1], ends[i*4+2], ends[i*4+3] = a.X, a.Y, b.X, b.Y
-		radii[i*3], radii[i*3+1], radii[i*3+2] = a.Radius/2, br.MiddleRadius, b.Radius/2
+		(*ends)[i*4], (*ends)[i*4+1], (*ends)[i*4+2], (*ends)[i*4+3] = a.X, a.Y, b.X, b.Y
+		(*radii)[i*3], (*radii)[i*3+1], (*radii)[i*3+2] = a.Radius/2, br.MiddleRadius, b.Radius/2
 	}
 
-	return ends, radii, release, nil
+	return nil
 }
 
 // Draw renders each group in its own pass, using the remaining groups
@@ -318,53 +305,56 @@ func (s *MetaballShader) drawPass(
 		)
 	}
 
-	w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
+	uniforms := s.pools.uniforms.Get().(map[string]any)
+	defer s.pools.uniforms.Put(uniforms)
+	uniforms["UvScale"] = uvScale[:]
+	uniforms["MainColor"] = []float32{color.R(), color.G(), color.B(), color.A()}
 
-	mainCircles, mainCirclesRelease := s.packCircles(&s.pools.mainCircles, main.Circles)
-	defer mainCirclesRelease()
-
-	uniforms := map[string]any{
-		"UvScale":   uvScale[:],
-		"MainColor": []float32{color.R(), color.G(), color.B(), color.A()},
-
-		"MainCircleCount": len(main.Circles),
-		"MainCircles":     mainCircles,
-	}
+	mainCircles := s.pools.mainCircles.Get()
+	s.packCircles(mainCircles, main.Circles)
+	defer s.pools.mainCircles.Put(mainCircles)
+	uniforms["MainCircleCount"] = len(main.Circles)
+	uniforms["MainCircles"] = *mainCircles
 
 	if s.config.MainBridges > 0 {
-		mainEnds, mainRadii, release, err := s.packBridges(&s.pools.mainBridgeEnds, &s.pools.mainBridgeRadii, main.Circles, main.Bridges)
-		defer release()
+		mainEnds := s.pools.mainBridgeEnds.Get()
+		mainRadii := s.pools.mainBridgeRadii.Get()
+		err := s.packBridges(mainEnds, mainRadii, main.Circles, main.Bridges)
+		defer s.pools.mainBridgeEnds.Put(mainEnds)
+		defer s.pools.mainBridgeRadii.Put(mainRadii)
 		if err != nil {
 			return err
 		}
-
 		uniforms["MainBridgeCount"] = len(main.Bridges)
-		uniforms["MainBridgeEnds"] = mainEnds
-		uniforms["MainBridgeRadii"] = mainRadii
+		uniforms["MainBridgeEnds"] = *mainEnds
+		uniforms["MainBridgeRadii"] = *mainRadii
 	}
 
 	if s.config.OtherCircles > 0 {
-		otherCircles, otherCirclesRelease := s.packCircles(&s.pools.otherCircles, other.Circles)
-		defer otherCirclesRelease()
-
+		otherCirclesBuf := s.pools.otherCircles.Get()
+		s.packCircles(otherCirclesBuf, other.Circles)
+		defer s.pools.otherCircles.Put(otherCirclesBuf)
 		uniforms["OtherCircleCount"] = len(other.Circles)
-		uniforms["OtherCircles"] = otherCircles
+		uniforms["OtherCircles"] = *otherCirclesBuf
 	}
 
 	if s.config.OtherBridges > 0 {
-		otherEnds, otherRadii, release, err := s.packBridges(&s.pools.otherBridgeEnds, &s.pools.otherBridgeRadii, other.Circles, other.Bridges)
-		defer release()
+		otherEnds := s.pools.otherBridgeEnds.Get()
+		otherRadii := s.pools.otherBridgeRadii.Get()
+		err := s.packBridges(otherEnds, otherRadii, other.Circles, other.Bridges)
+		defer s.pools.otherBridgeEnds.Put(otherEnds)
+		defer s.pools.otherBridgeRadii.Put(otherRadii)
 		if err != nil {
 			return err
 		}
-
 		uniforms["OtherBridgeCount"] = len(other.Bridges)
-		uniforms["OtherBridgeEnds"] = otherEnds
-		uniforms["OtherBridgeRadii"] = otherRadii
+		uniforms["OtherBridgeEnds"] = *otherEnds
+		uniforms["OtherBridgeRadii"] = *otherRadii
 	}
 
 	var transform ebiten.GeoM
 	transform.Translate(float64(origin[0]), float64(origin[1]))
+	w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
 	dst.DrawRectShader(w, h, s.shader, &ebiten.DrawRectShaderOptions{
 		GeoM:     transform,
 		Uniforms: uniforms,
