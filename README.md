@@ -81,7 +81,9 @@ if err := shader.Draw(dst, groups); err != nil {
 - `SmoothK` controls smooth-min blending and must be positive.
 - `LightDirX` and `LightDirY` select the edge-light direction. `(0, 0)` disables edge shading.
 - `EdgeThickness` must be positive when edge shading is enabled.
-- `FxaaEnabled` renders all groups to a cached offscreen buffer, then applies FXAA to it in one final pass to `dst`. `FxaaReduceMin`, `FxaaReduceMul`, and `FxaaSpanMax` tune the FXAA edge-detection thresholds (defaults: 128, 8, 8). Because the offscreen buffer is mutable per-shader-instance state, an `FxaaEnabled` shader's `Draw`/`DrawScaled`/`DrawScaledAt` calls are not safe for concurrent use on the same instance.
+- `FxaaEnabled` enables FXAA post-processing. `FxaaReduceMin`, `FxaaReduceMul`, and `FxaaSpanMax` tune the FXAA edge-detection thresholds (defaults: 128, 8, 8).
+
+`MetaballShader.Draw`, `MetaballShader.DrawScaled` and `MetaballShader.DrawScaledAt` are not safe for concurrent use on the same shader instance when FXAA is enabled, unless it is enabled at the `Renderer` level.
 
 ### UV scaling
 
@@ -148,7 +150,7 @@ Run an example from the repository root:
 ```text
 go run ./examples/helloworld
 go run ./examples/manycircles
-go run ./examples/manycirclesgif
+go run ./examples/demogif
 go run ./examples/bridges
 ```
 
