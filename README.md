@@ -96,7 +96,7 @@ Use `DrawScaled` with a uniform pixel scale to preserve circular shapes:
 err := shader.DrawScaled(dst, groups, [2]float32{1 / float32(h), 1 / float32(h)})
 ```
 
-`DrawScaledAt` additionally accepts an origin in destination pixels. It is intended for drawing into a sub-image while retaining coordinates from the full destination.
+`DrawScaledAt` additionally accepts an offset in destination pixels. It is intended for drawing into a sub-image while retaining coordinates from the full destination.
 
 ## Tiled renderer
 
@@ -133,9 +133,9 @@ stats, err := renderer.Draw(dst, groups)
 - `Workers`: number of CPU workers for filtering, tile planning and draw calls. Values `0` and `1` are serial.
 - `PoolMaxCircles`, `PoolMaxBridges`, `PoolMaxGroups`: optional initial scratch-pool sizes. Pools grow as needed and never shrink.
 
-`DrawScaled(dst, groups, uvScale)` is the renderer equivalent of `MetaballShader.DrawScaled`. The visible UV domain is the destination pixel dimensions multiplied by `uvScale`. Both scale components must be positive.
-
-`Renderer.Draw` and `Renderer.DrawScaled` are not safe for concurrent use on the same renderer. Use a separate renderer per goroutine.
+`Draw(dst, groups)`, `DrawScaled(dst, groups, uvScale)` and `DrawScaledAt(dst, groups, uvScale, offset)` are equivalent of `MetaballShader`'s methods of the same name.
+The visible UV domain is the destination pixel dimensions translated by `offset` and then multiplied by `uvScale`. Both scale components must be positive.
+The draw methods are not safe for concurrent use on the same renderer. Use a separate renderer per goroutine.
 
 `Stats` reports the last draw:
 

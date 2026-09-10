@@ -179,6 +179,12 @@ func (r *Renderer) Draw(dst *ebiten.Image, groups []Group) (*Stats, error) {
 // e.g. {1/h, 1/h} maps the canvas to [0, w/h]x[0, 1] in uv space. Both scale
 // components must be positive.
 func (r *Renderer) DrawScaled(dst *ebiten.Image, groups []Group, uvScale [2]float32) (*Stats, error) {
+	return r.DrawScaledAt(dst, groups, uvScale, [2]float32{0, 0})
+}
+
+// DrawScaledAt is like DrawScaled, but additionally offsets the fragment
+// position before applying the uv scale.
+func (r *Renderer) DrawScaledAt(dst *ebiten.Image, groups []Group, uvScale, offset [2]float32) (*Stats, error) {
 	if uvScale[0] <= 0 || uvScale[1] <= 0 {
 		return nil, fmt.Errorf("renderer: uv scale must be positive: %v", uvScale)
 	}
@@ -364,8 +370,8 @@ func (r *Renderer) drawTile(
 		return fmt.Errorf("renderer: SubImage did not return *ebiten.Image")
 	}
 
-	origin := [2]float32{float32(pixelRect.Min.X), float32(pixelRect.Min.Y)}
-	if err := r.shaders[tierIdx].DrawScaledAt(sub, filtered, xform.scale, origin); err != nil {
+	offset := [2]float32{float32(pixelRect.Min.X), float32(pixelRect.Min.Y)}
+	if err := r.shaders[tierIdx].DrawScaledAt(sub, filtered, xform.scale, offset); err != nil {
 		return err
 	}
 

@@ -315,11 +315,11 @@ func (s *MetaballShader) DrawScaled(dst *ebiten.Image, groups []Group, uvScale [
 }
 
 // DrawScaledAt is like DrawScaled, but additionally offsets the fragment
-// position by origin before applying the uv scale. This is required when dst
+// position before applying the uv scale. This is required when dst
 // is a sub-image: Kage's dstPos is local to the sub-image's own bounds, so
-// origin (the sub-image's pixel offset within the full canvas) must be added
+// offset (the sub-image's pixel offset within the full canvas) must be added
 // back to recover the full canvas's uv space.
-func (s *MetaballShader) DrawScaledAt(dst *ebiten.Image, groups []Group, uvScale, origin [2]float32) error {
+func (s *MetaballShader) DrawScaledAt(dst *ebiten.Image, groups []Group, uvScale, offset [2]float32) error {
 	if uvScale[0] <= 0 || uvScale[1] <= 0 {
 		return fmt.Errorf("uv scale must be positive: %v", uvScale)
 	}
@@ -336,14 +336,14 @@ func (s *MetaballShader) DrawScaledAt(dst *ebiten.Image, groups []Group, uvScale
 	for i, g := range groups {
 		other := combineGroups(groups, i)
 
-		if err := s.drawPass(target, g, other, g.Color, uvScale, origin); err != nil {
+		if err := s.drawPass(target, g, other, g.Color, uvScale, offset); err != nil {
 			return err
 		}
 	}
 
 	if s.fxaa != nil {
 		var transform ebiten.GeoM
-		transform.Translate(float64(origin[0]), float64(origin[1]))
+		transform.Translate(float64(offset[0]), float64(offset[1]))
 		w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
 		dst.DrawRectShader(w, h, s.fxaa, &ebiten.DrawRectShaderOptions{
 			GeoM:   transform,
@@ -360,7 +360,7 @@ func (s *MetaballShader) drawPass(
 	other Group,
 	color ebiten.ColorScale,
 	uvScale [2]float32,
-	origin [2]float32,
+	offset [2]float32,
 ) error {
 	if len(main.Circles) > s.config.MainCircles ||
 		len(main.Bridges) > s.config.MainBridges ||
@@ -423,7 +423,7 @@ func (s *MetaballShader) drawPass(
 	}
 
 	var transform ebiten.GeoM
-	transform.Translate(float64(origin[0]), float64(origin[1]))
+	transform.Translate(float64(offset[0]), float64(offset[1]))
 	w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
 	dst.DrawRectShader(w, h, s.shader, &ebiten.DrawRectShaderOptions{
 		GeoM:     transform,
