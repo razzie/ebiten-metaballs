@@ -737,3 +737,16 @@ func clipGroupsToTier(groups []Group, tier ShaderCapacity) int {
 
 	return dropped
 }
+
+// SetRootTiles configures the number of root tiles in the renderer's grid.
+// Not safe to call while rendering is in progress.
+func (r *Renderer) SetRootTiles(cols, rows int) {
+	r.cfg.RootCols = cols
+	r.cfg.RootRows = rows
+}
+
+// SetDebug enables or disables debug mode in the renderer.
+// Not safe to call while rendering is in progress.
+func (r *Renderer) SetDebug(enabled bool) {
+	r.cfg.Debug = enabled
+}

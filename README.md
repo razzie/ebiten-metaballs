@@ -137,6 +137,13 @@ stats, err := renderer.Draw(dst, groups)
 The visible UV domain comes from the destination bounds minus the scene's pixel offset, mapped through `xform`. Both scale components must be positive.
 The draw methods are not safe for concurrent use on the same renderer. Use a separate renderer per goroutine.
 
+`Renderer` also exposes runtime configuration helpers for the tiling grid and debug overlay:
+
+- `SetRootTiles(cols, rows)` reconfigures the initial coarse root grid used before adaptive subdivision.
+- `SetDebug(enabled)` toggles debug outlines for skipped, subdivided, and rendered tiles.
+
+These setters are not safe to call while rendering is in progress.
+
 `Stats` reports the last draw:
 
 - `TilesDrawn`: tiles that issued shader draws.
