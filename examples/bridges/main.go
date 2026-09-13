@@ -66,9 +66,9 @@ type movingGroup struct {
 }
 
 type Game struct {
-	renderer *metaballs.Renderer
-	groups   []movingGroup
-
+	renderer  *metaballs.Renderer
+	groups    []movingGroup
+	xform     metaballs.UVTransform
 	lastStats *metaballs.Stats
 }
 
@@ -177,9 +177,12 @@ func NewGame() (*Game, error) {
 		return nil, err
 	}
 
+	xform, _ := metaballs.NewCenteredUVTransform(screenWidth, screenHeight)
+
 	return &Game{
 		renderer:  renderer,
 		groups:    groups,
+		xform:     xform,
 		lastStats: new(metaballs.Stats),
 	}, nil
 }
@@ -249,7 +252,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		groups[i] = mg.group
 	}
 
-	stats, err := g.renderer.Draw(screen, groups)
+	stats, err := g.renderer.Draw(screen, groups, g.xform)
 	if err != nil {
 		panic(err)
 	}

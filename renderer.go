@@ -251,24 +251,6 @@ func NewRenderer(cfg RendererConfig) (*Renderer, error) {
 	return r, nil
 }
 
-// tileBounds is a uv-space rectangle within the visible uv domain.
-type tileBounds struct {
-	MinX, MinY, MaxX, MaxY float32
-}
-
-func (t tileBounds) padded(padding float32) tileBounds {
-	return tileBounds{
-		MinX: t.MinX - padding,
-		MinY: t.MinY - padding,
-		MaxX: t.MaxX + padding,
-		MaxY: t.MaxY + padding,
-	}
-}
-
-func (t tileBounds) size() (float32, float32) {
-	return t.MaxX - t.MinX, t.MaxY - t.MinY
-}
-
 // Stats reports how much work the last Draw call actually performed.
 type Stats struct {
 	TilesDrawn     atomic.Int32
@@ -277,35 +259,17 @@ type Stats struct {
 }
 
 // Draw renders groups by planning a tile grid over dst and drawing only the
-// tiles that contain circles, subdividing crowded tiles as needed. The uv
-// space is normalized against dst's own size (uv scale = 1/size), i.e. the
-// canvas covers [0,1]x[0,1] in uv space; on non-square canvases circles
-// stretch with the aspect ratio - use DrawScaled to avoid that.
-func (r *Renderer) Draw(dst *ebiten.Image, groups []Group) (*Stats, error) {
-	w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
-	return r.DrawScaled(dst, groups, [2]float32{1 / float32(w), 1 / float32(h)})
+// tiles that contain circles, subdividing crowded tiles as needed.
+func (r *Renderer) Draw(dst *ebiten.Image, groups []Group, xform UVTransform) (*Stats, error) {
+	return r.DrawAt(dst, groups, xform, image.Point{})
 }
 
-// DrawScaled is like Draw, but with an explicit uv scale (uv units per
-// pixel) instead of dst's own reciprocal size. The visible uv domain becomes
-// [0, width*scaleX] x [0, height*scaleY] and the tile grid is planned over
-// it. A uniform scale keeps circles circular regardless of aspect ratio:
-// e.g. {1/h, 1/h} maps the canvas to [0, w/h]x[0, 1] in uv space. Both scale
-// components must be positive.
-func (r *Renderer) DrawScaled(dst *ebiten.Image, groups []Group, uvScale [2]float32) (*Stats, error) {
-	return r.DrawScaledAt(dst, groups, uvScale, [2]float32{0, 0})
-}
-
-// DrawScaledAt is like DrawScaled, but additionally offsets the fragment
-// position before applying the uv scale.
-func (r *Renderer) DrawScaledAt(dst *ebiten.Image, groups []Group, uvScale, offset [2]float32) (*Stats, error) {
-	if uvScale[0] <= 0 || uvScale[1] <= 0 {
-		return nil, fmt.Errorf("renderer: uv scale must be positive: %v", uvScale)
-	}
-
-	xform := uvTransform{
-		scale:    uvScale,
-		invScale: [2]float32{1 / uvScale[0], 1 / uvScale[1]},
+// DrawAt is like Draw, but translates the scene by offset pixels in dst's
+// coordinate system: positive X moves right and positive Y moves down.
+// A sub-image clips the scene to its bounds without changing its origin.
+func (r *Renderer) DrawAt(dst *ebiten.Image, groups []Group, xform UVTransform, offset image.Point) (*Stats, error) {
+	if xform.scale[0] <= 0 || xform.scale[1] <= 0 {
+		return nil, fmt.Errorf("renderer: uv scale must be positive: %v", xform.scale)
 	}
 
 	maxCircles, maxBridges := 0, 0
@@ -321,31 +285,39 @@ func (r *Renderer) DrawScaledAt(dst *ebiten.Image, groups []Group, uvScale, offs
 
 	w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
 
-	// The visible uv domain covered by dst.
-	domainW := float32(w) * uvScale[0]
-	domainH := float32(h) * uvScale[1]
+	// Fold the scene translation into the UV transform so tile planning and
+	// shading use the same coordinates. FXAA additionally needs to map its
+	// zero-origin buffer back to the destination's coordinate system.
+	target := dst
+	renderXform := xform
+	renderXform.offset[0] -= float32(offset.X) * renderXform.scale[0]
+	renderXform.offset[1] -= float32(offset.Y) * renderXform.scale[1]
+	if r.fxaa != nil {
+		target = r.offscreenFor(w, h)
+		target.Clear()
+		renderXform.offset[0] += float32(dst.Bounds().Min.X) * renderXform.scale[0]
+		renderXform.offset[1] += float32(dst.Bounds().Min.Y) * renderXform.scale[1]
+	}
+
+	// The visible UV domain covered by dst. Both the pixel offset and the UV
+	// offset are part of the forward transform; mixing either one directly
+	// into the other coordinate space makes tile clipping diverge from the
+	// shader on non-square, centered viewports.
+	domain := visibleUVBounds(target.Bounds().Min, image.Pt(w, h), renderXform)
+	domainW, domainH := domain.Size()
 
 	dw := domainW / float32(r.cfg.RootCols)
 	dh := domainH / float32(r.cfg.RootRows)
 
-	rootTile := func(idx int) tileBounds {
+	rootTile := func(idx int) UVBounds {
 		col := idx % r.cfg.RootCols
 		row := idx / r.cfg.RootCols
-		return tileBounds{
-			MinX: float32(col) * dw,
-			MinY: float32(row) * dh,
-			MaxX: float32(col+1) * dw,
-			MaxY: float32(row+1) * dh,
+		return UVBounds{
+			MinX: domain.MinX + float32(col)*dw,
+			MinY: domain.MinY + float32(row)*dh,
+			MaxX: domain.MinX + float32(col+1)*dw,
+			MaxY: domain.MinY + float32(row+1)*dh,
 		}
-	}
-
-	// FXAA needs the fully-composited image, so all group passes render into
-	// an offscreen buffer first and only the final antialiased result reaches dst.
-	target := dst
-	if r.fxaa != nil {
-		w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
-		target = r.offscreenFor(w, h)
-		target.Clear()
 	}
 
 	var stats Stats
@@ -357,13 +329,13 @@ func (r *Renderer) DrawScaledAt(dst *ebiten.Image, groups []Group, uvScale, offs
 		sem := make(chan struct{}, r.cfg.Workers)
 		for idx := 0; idx < total; idx++ {
 			g.Go(func() error {
-				return r.drawTile(target, xform, groups, rootTile(idx), 0, &stats, sem)
+				return r.drawTile(target, groups, renderXform, rootTile(idx), 0, &stats, sem)
 			})
 		}
 		err = g.Wait()
 	} else {
 		for idx := 0; idx < total; idx++ {
-			if drawErr := r.drawTile(target, xform, groups, rootTile(idx), 0, &stats, nil); drawErr != nil {
+			if drawErr := r.drawTile(target, groups, renderXform, rootTile(idx), 0, &stats, nil); drawErr != nil {
 				err = drawErr
 				break
 			}
@@ -372,8 +344,7 @@ func (r *Renderer) DrawScaledAt(dst *ebiten.Image, groups []Group, uvScale, offs
 
 	if r.fxaa != nil {
 		var transform ebiten.GeoM
-		transform.Translate(float64(xform.scale[0]), float64(xform.scale[1]))
-		w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
+		transform.Translate(float64(dst.Bounds().Min.X), float64(dst.Bounds().Min.Y))
 		dst.DrawRectShader(w, h, r.fxaa, &ebiten.DrawRectShaderOptions{
 			GeoM:   transform,
 			Images: [4]*ebiten.Image{target},
@@ -395,18 +366,11 @@ func (r *Renderer) offscreenFor(w, h int) *ebiten.Image {
 	return r.offscreen
 }
 
-// uvTransform holds the uv scale (uv units per pixel) and its inverse
-// (pixels per uv unit), the latter precomputed once per Draw so that
-// uv-to-pixel conversions stay multiplications.
-type uvTransform struct {
-	scale, invScale [2]float32
-}
-
 func (r *Renderer) drawTile(
 	dst *ebiten.Image,
-	xform uvTransform,
 	groups []Group,
-	tile tileBounds,
+	xform UVTransform,
+	tile UVBounds,
 	depth int,
 	stats *Stats,
 	sem chan struct{},
@@ -435,7 +399,7 @@ func (r *Renderer) drawTile(
 	tierIdx := r.pickTier(cap)
 
 	if tierIdx < 0 {
-		tw, th := tile.size()
+		tw, th := tile.Size()
 
 		if depth < r.cfg.MaxDepth && tw > 2*r.cfg.MinTileSize && th > 2*r.cfg.MinTileSize {
 			prepRelease()
@@ -443,7 +407,7 @@ func (r *Renderer) drawTile(
 			midX := (tile.MinX + tile.MaxX) / 2
 			midY := (tile.MinY + tile.MaxY) / 2
 
-			children := [4]tileBounds{
+			children := [4]UVBounds{
 				{tile.MinX, tile.MinY, midX, midY},
 				{midX, tile.MinY, tile.MaxX, midY},
 				{tile.MinX, midY, midX, tile.MaxY},
@@ -451,7 +415,7 @@ func (r *Renderer) drawTile(
 			}
 
 			for _, child := range children {
-				if err := r.drawTile(dst, xform, groups, child, depth+1, stats, sem); err != nil {
+				if err := r.drawTile(dst, groups, xform, child, depth+1, stats, sem); err != nil {
 					return err
 				}
 			}
@@ -474,7 +438,7 @@ func (r *Renderer) drawTile(
 		stats.CirclesClipped.Add(int32(clipped))
 	}
 
-	pixelRect := tileToPixelRect(tile, xform.invScale)
+	pixelRect := tileToPixelRect(tile, xform)
 	if pixelRect.Dx() <= 0 || pixelRect.Dy() <= 0 {
 		return nil
 	}
@@ -484,8 +448,7 @@ func (r *Renderer) drawTile(
 		return fmt.Errorf("renderer: SubImage did not return *ebiten.Image")
 	}
 
-	offset := [2]float32{float32(pixelRect.Min.X), float32(pixelRect.Min.Y)}
-	if err := r.shaders[tierIdx].DrawScaledAt(sub, filtered, xform.scale, offset); err != nil {
+	if err := r.shaders[tierIdx].Draw(sub, filtered, xform); err != nil {
 		return err
 	}
 
@@ -510,8 +473,8 @@ var (
 
 // drawDebugOutline draws a 1px outline around tile: black top/left edges,
 // white bottom/right edges, both at ~0.5 alpha.
-func (r *Renderer) drawDebugOutline(dst *ebiten.Image, xform uvTransform, tile tileBounds) {
-	pixelRect := tileToPixelRect(tile, xform.invScale)
+func (r *Renderer) drawDebugOutline(dst *ebiten.Image, xform UVTransform, tile UVBounds) {
+	pixelRect := tileToPixelRect(tile, xform)
 	if pixelRect.Dx() <= 0 || pixelRect.Dy() <= 0 {
 		return
 	}
@@ -525,21 +488,30 @@ func (r *Renderer) drawDebugOutline(dst *ebiten.Image, xform uvTransform, tile t
 	vector.StrokeLine(dst, maxX, minY, maxX, maxY, 1, debugBottomRightColor, false)
 }
 
-// tileToPixelRect converts a uv-space tile to pixel coordinates; invScale
-// is the inverse uv scale (pixels per uv unit).
-func tileToPixelRect(tile tileBounds, invScale [2]float32) image.Rectangle {
+// visibleUVBounds applies the forward UV transform to a pixel-space region.
+func visibleUVBounds(origin, size image.Point, xform UVTransform) UVBounds {
+	return UVBounds{
+		MinX: float32(origin.X)*xform.scale[0] + xform.offset[0],
+		MinY: float32(origin.Y)*xform.scale[1] + xform.offset[1],
+		MaxX: float32(origin.X+size.X)*xform.scale[0] + xform.offset[0],
+		MaxY: float32(origin.Y+size.Y)*xform.scale[1] + xform.offset[1],
+	}
+}
+
+// tileToPixelRect applies the inverse UV transform to a UV-space tile.
+func tileToPixelRect(tile UVBounds, xform UVTransform) image.Rectangle {
 	return image.Rect(
-		int(tile.MinX*invScale[0]+0.5),
-		int(tile.MinY*invScale[1]+0.5),
-		int(tile.MaxX*invScale[0]+0.5),
-		int(tile.MaxY*invScale[1]+0.5),
+		int((tile.MinX-xform.offset[0])*xform.invScale[0]+0.5),
+		int((tile.MinY-xform.offset[1])*xform.invScale[1]+0.5),
+		int((tile.MaxX-xform.offset[0])*xform.invScale[0]+0.5),
+		int((tile.MaxY-xform.offset[1])*xform.invScale[1]+0.5),
 	)
 }
 
 // circleOverlapsTile reports whether a circle's AABB overlaps the tile,
 // padded by smoothK since smooth-min blending bulges the rendered shape
 // beyond the nominal radius.
-func circleOverlapsTile(c Circle, tile tileBounds, smoothK float32) bool {
+func circleOverlapsTile(c Circle, tile UVBounds, smoothK float32) bool {
 	r := c.Radius + smoothK
 	return c.X+r >= tile.MinX && c.X-r <= tile.MaxX &&
 		c.Y+r >= tile.MinY && c.Y-r <= tile.MaxY
@@ -547,7 +519,7 @@ func circleOverlapsTile(c Circle, tile tileBounds, smoothK float32) bool {
 
 // segmentIntersectsRect reports whether the segment from (x1,y1) to (x2,y2)
 // intersects rect, via Liang-Barsky clipping.
-func segmentIntersectsRect(x1, y1, x2, y2 float32, rect tileBounds) bool {
+func segmentIntersectsRect(x1, y1, x2, y2 float32, rect UVBounds) bool {
 	dx, dy := x2-x1, y2-y1
 	tMin, tMax := float32(0), float32(1)
 
@@ -587,7 +559,7 @@ func segmentIntersectsRect(x1, y1, x2, y2 float32, rect tileBounds) bool {
 // The returned prep is later reused by materializeGroupsFromPrep when the
 // tile ends up drawn, instead of recomputing the same bitset; if the tile
 // subdivides instead, the caller just calls release without materializing.
-func (r *Renderer) prepareGroupsForTile(groups []Group, tile tileBounds) (prep []groupPrep, any bool, cap ShaderCapacity, release func()) {
+func (r *Renderer) prepareGroupsForTile(groups []Group, tile UVBounds) (prep []groupPrep, any bool, cap ShaderCapacity, release func()) {
 	prepPtr := r.pools.preps.get()
 	p := (*prepPtr)[:len(groups)]
 
@@ -637,12 +609,12 @@ func (r *Renderer) prepareGroupsForTile(groups []Group, tile tileBounds) (prep [
 // MiddleRadius, since its rendered shape bulges by up to that much off its
 // segment). Reports whether anything was included. pools supplies scratch
 // buffers for filterCirclesOverlap.
-func computeIncludedSet(pools *rendererPools, g *Group, tile tileBounds, included *bitset.BitSet, smoothK float32) bool {
+func computeIncludedSet(pools *rendererPools, g *Group, tile UVBounds, included *bitset.BitSet, smoothK float32) bool {
 	found := filterCirclesOverlap(pools, g.Circles, tile, included, smoothK)
 
 	for _, b := range g.Bridges {
 		a, c := g.Circles[b.A], g.Circles[b.B]
-		bridgeTile := tile.padded(b.MiddleRadius + smoothK)
+		bridgeTile := tile.Padded(b.MiddleRadius + smoothK)
 		if segmentIntersectsRect(a.X, a.Y, c.X, c.Y, bridgeTile) {
 			included.Set(b.A)
 			included.Set(b.B)
@@ -657,7 +629,7 @@ func computeIncludedSet(pools *rendererPools, g *Group, tile tileBounds, include
 // non-hot-path code) that don't already have a prepareGroupsForTile
 // result; the Draw hot path uses materializeGroupsFromPrep directly to
 // avoid recomputing the included bitsets it already has.
-func (r *Renderer) materializeGroupsForTile(groups []Group, tile tileBounds) (filtered []Group, release func()) {
+func (r *Renderer) materializeGroupsForTile(groups []Group, tile UVBounds) (filtered []Group, release func()) {
 	prep, _, _, prepRelease := r.prepareGroupsForTile(groups, tile)
 	filtered, matRelease := materializeGroupsFromPrep(&r.pools, groups, prep)
 	return filtered, func() {

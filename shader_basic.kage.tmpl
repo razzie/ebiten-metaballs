@@ -9,6 +9,8 @@ const MaxMainCircles = {{.MainCircles}}
 {{if gt .OtherBridges 0}}const MaxOtherBridges = {{.OtherBridges}}{{end}}
 
 var UvScale vec2
+var UvOffset vec2
+var PixelOrigin vec2
 var MainColor vec4
 var MainCircleCount int
 var MainCircles [MaxMainCircles]vec4
@@ -70,7 +72,7 @@ func sdSplineCapsuleDistance(
 {{end}}
 
 func Fragment(dstPos vec4) vec4 {
-	uv := dstPos.xy * UvScale
+	uv := (dstPos.xy - imageDstOrigin() + PixelOrigin) * UvScale + UvOffset
 
 	k := SmoothK
 	big := 100.0

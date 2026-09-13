@@ -5,7 +5,6 @@ import (
 	"log"
 	"math"
 	"math/rand"
-	"time"
 
 	metaballs "github.com/razzie/ebiten-metaballs"
 
@@ -39,9 +38,10 @@ type movingGroup struct {
 }
 
 type Game struct {
-	renderer *metaballs.Renderer
-	groups   []movingGroup
-
+	renderer  *metaballs.Renderer
+	groups    []movingGroup
+	xform     metaballs.UVTransform
+	bounds    metaballs.UVBounds
 	lastStats *metaballs.Stats
 }
 
@@ -111,9 +111,13 @@ func NewGame() (*Game, error) {
 		return nil, err
 	}
 
+	xform, bounds := metaballs.NewCenteredUVTransform(screenWidth, screenHeight)
+
 	return &Game{
 		renderer:  renderer,
 		groups:    groups,
+		xform:     xform,
+		bounds:    bounds,
 		lastStats: new(metaballs.Stats),
 	}, nil
 }
@@ -131,19 +135,19 @@ func (g *Game) Update() error {
 			c.X += v.X * dt
 			c.Y += v.Y * dt
 
-			if c.X-c.Radius < 0 {
-				c.X = c.Radius
+			if c.X-c.Radius < g.bounds.MinX {
+				c.X = g.bounds.MinX + c.Radius
 				v.X = -v.X
-			} else if c.X+c.Radius > 1 {
-				c.X = 1 - c.Radius
+			} else if c.X+c.Radius > g.bounds.MaxX {
+				c.X = g.bounds.MaxX - c.Radius
 				v.X = -v.X
 			}
 
-			if c.Y-c.Radius < 0 {
-				c.Y = c.Radius
+			if c.Y-c.Radius < g.bounds.MinY {
+				c.Y = g.bounds.MinY + c.Radius
 				v.Y = -v.Y
-			} else if c.Y+c.Radius > 1 {
-				c.Y = 1 - c.Radius
+			} else if c.Y+c.Radius > g.bounds.MaxY {
+				c.Y = g.bounds.MaxY - c.Radius
 				v.Y = -v.Y
 			}
 		}
@@ -158,9 +162,8 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		groups[i] = mg.group
 	}
 
-	stats, err := g.renderer.Draw(screen, groups)
+	stats, err := g.renderer.Draw(screen, groups, g.xform)
 	if err != nil {
-		//panic(err)
 		ebitenutil.DebugPrint(screen, err.Error())
 		return
 	}
@@ -181,12 +184,11 @@ func (g *Game) Draw(screen *ebiten.Image) {
 }
 
 func (g *Game) Layout(outsideWidth, outsideHeight int) (int, int) {
-	return screenWidth, screenHeight
+	g.xform, g.bounds = metaballs.NewCenteredUVTransform(outsideWidth, outsideHeight)
+	return outsideWidth, outsideHeight
 }
 
 func main() {
-	rand.Seed(time.Now().UnixNano())
-
 	game, err := NewGame()
 	if err != nil {
 		log.Fatal(err)

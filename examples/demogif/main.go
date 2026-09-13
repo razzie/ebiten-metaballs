@@ -336,6 +336,7 @@ func (mg *movingGroup) setTime(t float32) {
 type Game struct {
 	shader    *metaballs.MetaballShader
 	groups    []movingGroup
+	xform     metaballs.UVTransform
 	offscreen *ebiten.Image
 	captured  bool
 }
@@ -374,9 +375,12 @@ func NewGame() (*Game, error) {
 		return nil, err
 	}
 
+	xform, _ := metaballs.NewCenteredUVTransform(canvasSize, canvasSize)
+
 	return &Game{
 		shader:    shader,
 		groups:    groups,
+		xform:     xform,
 		offscreen: ebiten.NewImage(canvasSize, canvasSize),
 	}, nil
 }
@@ -411,7 +415,7 @@ func (g *Game) capture() {
 
 		g.offscreen.Clear()
 
-		if err := g.shader.Draw(g.offscreen, shaderGroups); err != nil {
+		if err := g.shader.Draw(g.offscreen, shaderGroups, g.xform); err != nil {
 			log.Fatal(err)
 		}
 

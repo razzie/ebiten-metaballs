@@ -83,20 +83,20 @@ if err := shader.Draw(dst, groups); err != nil {
 - `EdgeThickness` must be positive when edge shading is enabled.
 - `FxaaEnabled` enables FXAA post-processing. `FxaaReduceMin`, `FxaaReduceMul`, and `FxaaSpanMax` tune the FXAA edge-detection thresholds (defaults: 128, 8, 8).
 
-`MetaballShader.Draw`, `MetaballShader.DrawScaled` and `MetaballShader.DrawScaledAt` are not safe for concurrent use on the same shader instance when FXAA is enabled, unless it is enabled at the `Renderer` level.
+`MetaballShader.Draw` and `MetaballShader.DrawAt` are not safe for concurrent use on the same shader instance when FXAA is enabled, unless it is enabled at the `Renderer` level.
 
 ### UV scaling
 
-`Draw` maps the destination to UV scale `{1 / width, 1 / height}`. This makes the UV domain `[0, 1] x [0, 1]`, but circles are not aspect-correct on non-square destinations.
+`Draw(dst, groups, xform)` maps destination pixel coordinates through a `UVTransform`. Both scale components must be positive.
 
-Use `DrawScaled` with a uniform pixel scale to preserve circular shapes:
+Use `NewCenteredUVTransform` to preserve circular shapes and center the scene:
 
 ```go
-// For a destination with height h:
-err := shader.DrawScaled(dst, groups, [2]float32{1 / float32(h), 1 / float32(h)})
+xform, _ := metaballs.NewCenteredUVTransform(width, height)
+err := shader.Draw(dst, groups, xform)
 ```
 
-`DrawScaledAt` additionally accepts an offset in destination pixels. It is intended for drawing into a sub-image while retaining coordinates from the full destination.
+`DrawAt(dst, groups, xform, offset)` translates the scene in destination pixels: positive X moves right and positive Y moves down. Sub-images clip the scene while retaining the parent's coordinates; no additional offset is needed to compensate for their bounds. Sampling uses `uv = (destinationPixel - offset) * scale + uvOffset`.
 
 ## Tiled renderer
 
@@ -133,8 +133,8 @@ stats, err := renderer.Draw(dst, groups)
 - `Workers`: number of CPU workers for filtering, tile planning and draw calls. Values `0` and `1` are serial.
 - `PoolMaxCircles`, `PoolMaxBridges`, `PoolMaxGroups`: optional initial scratch-pool sizes. Pools grow as needed and never shrink.
 
-`Draw(dst, groups)`, `DrawScaled(dst, groups, uvScale)` and `DrawScaledAt(dst, groups, uvScale, offset)` are equivalent of `MetaballShader`'s methods of the same name.
-The visible UV domain is the destination pixel dimensions translated by `offset` and then multiplied by `uvScale`. Both scale components must be positive.
+`Draw(dst, groups, xform)` and `DrawAt(dst, groups, xform, offset)` follow the same coordinate rules as `MetaballShader`.
+The visible UV domain comes from the destination bounds minus the scene's pixel offset, mapped through `xform`. Both scale components must be positive.
 The draw methods are not safe for concurrent use on the same renderer. Use a separate renderer per goroutine.
 
 `Stats` reports the last draw:

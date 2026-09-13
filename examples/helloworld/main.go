@@ -22,11 +22,10 @@ const (
 )
 
 type Game struct {
-	shader *metaballs.MetaballShader
-
-	groups []metaballs.Group
-
-	startTime time.Time
+	shader      *metaballs.MetaballShader
+	groups      []metaballs.Group
+	startTime   time.Time
+	uvTransform metaballs.UVTransform
 }
 
 func NewGame() (*Game, error) {
@@ -94,8 +93,7 @@ func (g *Game) Update() error {
 	// Mouse-controlled blue metaball.
 	mx, my := ebiten.CursorPosition()
 
-	mouseX := float32(mx) / screenWidth
-	mouseY := float32(my) / screenHeight
+	mouseX, mouseY := g.uvTransform.ScreenToUV(mx, my)
 
 	// Similar default position to the Shadertoy version.
 	if mx == 0 && my == 0 {
@@ -129,13 +127,14 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	//
 	// screen.Fill(color.RGBA{30, 30, 30, 255})
 
-	if err := g.shader.Draw(screen, g.groups); err != nil {
+	if err := g.shader.Draw(screen, g.groups, g.uvTransform); err != nil {
 		panic(err)
 	}
 }
 
 func (g *Game) Layout(outsideWidth, outsideHeight int) (int, int) {
-	return screenWidth, screenHeight
+	g.uvTransform, _ = metaballs.NewCenteredUVTransform(outsideWidth, outsideHeight)
+	return outsideWidth, outsideHeight
 }
 
 func main() {

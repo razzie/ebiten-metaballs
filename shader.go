@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"embed"
 	"fmt"
+	"image"
 	"math"
 	"strconv"
 	"strings"
@@ -183,30 +184,21 @@ func packBridges(ends, radii *[]float32, circles []Circle, bridges []Bridge) (er
 }
 
 // Draw renders each group in its own pass, using the remaining groups
-// combined as the "other" field to drive the squeezing effect. The uv space
-// is normalized against dst's own size (uv scale = 1/size).
-func (s *MetaballShader) Draw(dst *ebiten.Image, groups []Group) error {
-	w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
-	return s.DrawScaled(dst, groups, [2]float32{1 / float32(w), 1 / float32(h)})
+// combined as the "other" field to drive the squeezing effect.
+func (s *MetaballShader) Draw(dst *ebiten.Image, groups []Group, xform UVTransform) error {
+	return s.DrawAt(dst, groups, xform, image.Point{})
 }
 
-// DrawScaled is like Draw, but with an explicit uv scale (uv units per
-// pixel) instead of dst's own reciprocal size. A uniform scale keeps circles
-// circular regardless of aspect ratio: e.g. {1/h, 1/h} maps the canvas to
-// [0, w/h]x[0, 1] in uv space. Both scale components must be positive.
-func (s *MetaballShader) DrawScaled(dst *ebiten.Image, groups []Group, uvScale [2]float32) error {
-	return s.DrawScaledAt(dst, groups, uvScale, [2]float32{0, 0})
-}
-
-// DrawScaledAt is like DrawScaled, but additionally offsets the fragment
-// position before applying the uv scale. This is required when dst
-// is a sub-image: Kage's dstPos is local to the sub-image's own bounds, so
-// offset (the sub-image's pixel offset within the full canvas) must be added
-// back to recover the full canvas's uv space.
-func (s *MetaballShader) DrawScaledAt(dst *ebiten.Image, groups []Group, uvScale, offset [2]float32) error {
-	if uvScale[0] <= 0 || uvScale[1] <= 0 {
-		return fmt.Errorf("uv scale must be positive: %v", uvScale)
+// DrawAt is like Draw, but translates the scene by offset pixels in dst's
+// coordinate system: positive X moves right and positive Y moves down.
+// A sub-image clips the scene to its bounds without changing its origin.
+func (s *MetaballShader) DrawAt(dst *ebiten.Image, groups []Group, xform UVTransform, offset image.Point) error {
+	if xform.scale[0] <= 0 || xform.scale[1] <= 0 {
+		return fmt.Errorf("uv scale must be positive: %v", xform.scale)
 	}
+	// Map destination-local pixels back to the untranslated scene. Keep the
+	// destination origin even when rendering into a zero-origin FXAA buffer.
+	pixelOrigin := dst.Bounds().Min.Sub(offset)
 
 	// FXAA needs the fully-composited image, so all group passes render into
 	// an offscreen buffer first and only the final antialiased result reaches dst.
@@ -220,14 +212,14 @@ func (s *MetaballShader) DrawScaledAt(dst *ebiten.Image, groups []Group, uvScale
 	for i, g := range groups {
 		other := combineGroups(groups, i)
 
-		if err := s.drawPass(target, g, other, g.Color, uvScale, offset); err != nil {
+		if err := s.drawPass(target, g, other, g.Color, xform, pixelOrigin); err != nil {
 			return err
 		}
 	}
 
 	if s.fxaa != nil {
 		var transform ebiten.GeoM
-		transform.Translate(float64(offset[0]), float64(offset[1]))
+		transform.Translate(float64(dst.Bounds().Min.X), float64(dst.Bounds().Min.Y))
 		w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
 		dst.DrawRectShader(w, h, s.fxaa, &ebiten.DrawRectShaderOptions{
 			GeoM:   transform,
@@ -243,8 +235,8 @@ func (s *MetaballShader) drawPass(
 	main Group,
 	other Group,
 	color ebiten.ColorScale,
-	uvScale [2]float32,
-	offset [2]float32,
+	xform UVTransform,
+	pixelOrigin image.Point,
 ) error {
 	if len(main.Circles) > s.config.MainCircles ||
 		len(main.Bridges) > s.config.MainBridges ||
@@ -261,7 +253,9 @@ func (s *MetaballShader) drawPass(
 
 	uniforms := s.pools.uniforms.Get().(map[string]any)
 	defer s.pools.uniforms.Put(uniforms)
-	uniforms["UvScale"] = uvScale[:]
+	uniforms["UvScale"] = xform.scale[:]
+	uniforms["UvOffset"] = xform.offset[:]
+	uniforms["PixelOrigin"] = []float32{float32(pixelOrigin.X), float32(pixelOrigin.Y)}
 	uniforms["MainColor"] = []float32{color.R(), color.G(), color.B(), color.A()}
 
 	mainCircles := s.pools.mainCircles.Get()
@@ -307,7 +301,7 @@ func (s *MetaballShader) drawPass(
 	}
 
 	var transform ebiten.GeoM
-	transform.Translate(float64(offset[0]), float64(offset[1]))
+	transform.Translate(float64(dst.Bounds().Min.X), float64(dst.Bounds().Min.Y))
 	w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
 	dst.DrawRectShader(w, h, s.shader, &ebiten.DrawRectShaderOptions{
 		GeoM:     transform,

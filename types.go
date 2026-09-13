@@ -119,3 +119,85 @@ func CapacityForGroups(groups []Group) ShaderCapacity {
 		OtherBridges: totalBridges,
 	}
 }
+
+// UVBounds is a uv-space rectangle within the visible uv domain.
+type UVBounds struct {
+	MinX, MinY, MaxX, MaxY float32
+}
+
+func (t UVBounds) Padded(padding float32) UVBounds {
+	return UVBounds{
+		MinX: t.MinX - padding,
+		MinY: t.MinY - padding,
+		MaxX: t.MaxX + padding,
+		MaxY: t.MaxY + padding,
+	}
+}
+
+func (t UVBounds) Size() (float32, float32) {
+	return t.MaxX - t.MinX, t.MaxY - t.MinY
+}
+
+// UVTransform holds the uv scale, its inverse and the offset
+type UVTransform struct {
+	scale, invScale, offset [2]float32
+}
+
+func (t *UVTransform) Scale() (float32, float32) {
+	return t.scale[0], t.scale[1]
+}
+
+func (t *UVTransform) SetScale(x, y float32) {
+	t.scale[0] = x
+	t.scale[1] = y
+	t.invScale[0] = 1.0 / x
+	t.invScale[1] = 1.0 / y
+}
+
+func (t *UVTransform) Offset() (float32, float32) {
+	return t.offset[0], t.offset[1]
+}
+
+func (t *UVTransform) SetOffset(x, y float32) {
+	t.offset[0] = x
+	t.offset[1] = y
+}
+
+func (t *UVTransform) ScreenToUV(sx, sy int) (float32, float32) {
+	uvX := float32(sx)*t.scale[0] + t.offset[0]
+	uvY := float32(sy)*t.scale[1] + t.offset[1]
+	return uvX, uvY
+}
+
+// NewCenteredUVTransform generates a UVTransform and corresponding UVBounds for the given pixel dimensions,
+// making sure 0.5:0.5 in UV space maps to the center of the pixel dimensions, keeping aspect ratio at 1:1.
+//
+// Intended transform:
+//
+//	uv = screenPos * scale + offset
+func NewCenteredUVTransform(width, height int) (UVTransform, UVBounds) {
+	if width <= 0 || height <= 0 {
+		panic("width and height must be positive")
+	}
+
+	// The shorter screen dimension spans exactly 1 UV unit.
+	size := float32(min(width, height))
+	scale := float32(1) / size
+
+	// Screen center must map to UV (0.5, 0.5).
+	ox := float32(0.5) - float32(width)*0.5*scale
+	oy := float32(0.5) - float32(height)*0.5*scale
+
+	var transform UVTransform
+	transform.SetScale(scale, scale)
+	transform.SetOffset(ox, oy)
+
+	bounds := UVBounds{
+		MinX: ox,
+		MinY: oy,
+		MaxX: float32(width)*scale + ox,
+		MaxY: float32(height)*scale + oy,
+	}
+
+	return transform, bounds
+}

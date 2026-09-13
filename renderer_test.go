@@ -1,11 +1,101 @@
 package metaballs
 
 import (
+	"image"
 	"testing"
 
 	"github.com/razzie/ebiten-metaballs/internal/bitset"
 	"github.com/razzie/ebiten-metaballs/internal/pool"
 )
+
+func TestCenteredUVBoundsRoundTripNonSquareDestinations(t *testing.T) {
+	tests := []struct {
+		name          string
+		width, height int
+	}{
+		{name: "wide", width: 1600, height: 900},
+		{name: "tall", width: 900, height: 1600},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			xform, wantBounds := NewCenteredUVTransform(test.width, test.height)
+			gotBounds := visibleUVBounds(image.Point{}, image.Pt(test.width, test.height), xform)
+			if gotBounds != wantBounds {
+				t.Fatalf("visibleUVBounds() = %+v, want %+v", gotBounds, wantBounds)
+			}
+
+			wantRect := image.Rect(0, 0, test.width, test.height)
+			if gotRect := tileToPixelRect(gotBounds, xform); gotRect != wantRect {
+				t.Fatalf("tileToPixelRect() = %v, want %v", gotRect, wantRect)
+			}
+
+			// Adjacent UV tiles must map to pixel rectangles with exactly the
+			// same shared edge; otherwise independently rendered tiles leave a
+			// gap or overlap at the boundary.
+			midX := (gotBounds.MinX + gotBounds.MaxX) / 2
+			left := tileToPixelRect(UVBounds{
+				MinX: gotBounds.MinX, MinY: gotBounds.MinY,
+				MaxX: midX, MaxY: gotBounds.MaxY,
+			}, xform)
+			right := tileToPixelRect(UVBounds{
+				MinX: midX, MinY: gotBounds.MinY,
+				MaxX: gotBounds.MaxX, MaxY: gotBounds.MaxY,
+			}, xform)
+			if left.Max.X != right.Min.X {
+				t.Fatalf("adjacent tiles disagree at x boundary: %v and %v", left, right)
+			}
+
+			midY := (gotBounds.MinY + gotBounds.MaxY) / 2
+			top := tileToPixelRect(UVBounds{
+				MinX: gotBounds.MinX, MinY: gotBounds.MinY,
+				MaxX: gotBounds.MaxX, MaxY: midY,
+			}, xform)
+			bottom := tileToPixelRect(UVBounds{
+				MinX: gotBounds.MinX, MinY: midY,
+				MaxX: gotBounds.MaxX, MaxY: gotBounds.MaxY,
+			}, xform)
+			if top.Max.Y != bottom.Min.Y {
+				t.Fatalf("adjacent tiles disagree at y boundary: %v and %v", top, bottom)
+			}
+		})
+	}
+}
+
+func TestUVBoundsRoundTripWithPixelAndUVOffsets(t *testing.T) {
+	var xform UVTransform
+	xform.SetScale(0.002, 0.004)
+	xform.SetOffset(-0.3, 0.2)
+
+	origin := image.Pt(25, 40)
+	size := image.Pt(300, 100)
+	bounds := visibleUVBounds(origin, size, xform)
+	wantBounds := UVBounds{
+		MinX: -0.25,
+		MinY: 0.36,
+		MaxX: 0.35,
+		MaxY: 0.76,
+	}
+	const epsilon = 1e-6
+	if abs32(bounds.MinX-wantBounds.MinX) > epsilon ||
+		abs32(bounds.MinY-wantBounds.MinY) > epsilon ||
+		abs32(bounds.MaxX-wantBounds.MaxX) > epsilon ||
+		abs32(bounds.MaxY-wantBounds.MaxY) > epsilon {
+		t.Fatalf("visibleUVBounds() = %+v, want %+v", bounds, wantBounds)
+	}
+
+	wantRect := image.Rectangle{Min: origin, Max: origin.Add(size)}
+	if gotRect := tileToPixelRect(bounds, xform); gotRect != wantRect {
+		t.Fatalf("tileToPixelRect() = %v, want %v", gotRect, wantRect)
+	}
+}
+
+func abs32(v float32) float32 {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
 
 func mustGroup(circles []Circle, bridges []Bridge) Group {
 	return Group{Circles: circles, Bridges: bridges}
@@ -123,7 +213,7 @@ func TestRendererPoolsEnsureMixedGrowth(t *testing.T) {
 }
 
 func TestProbeMaterializeAgree(t *testing.T) {
-	tile := tileBounds{MinX: 0, MinY: 0, MaxX: 0.5, MaxY: 0.5}
+	tile := UVBounds{MinX: 0, MinY: 0, MaxX: 0.5, MaxY: 0.5}
 
 	groups := []Group{
 		mustGroup(
@@ -175,7 +265,7 @@ func TestProbeMaterializeAgree(t *testing.T) {
 }
 
 func TestProbeGroupsForTileNoOverlap(t *testing.T) {
-	tile := tileBounds{MinX: 0, MinY: 0, MaxX: 0.1, MaxY: 0.1}
+	tile := UVBounds{MinX: 0, MinY: 0, MaxX: 0.1, MaxY: 0.1}
 	groups := []Group{mustGroup([]Circle{{X: 0.9, Y: 0.9, Radius: 0.01}}, nil)}
 	r := testRenderer(groups, 0)
 
@@ -197,7 +287,7 @@ func TestProbeGroupsForTileNoOverlap(t *testing.T) {
 // single SIMD vector lane width and a mix of included/excluded circles, to
 // catch tail-handling and masking bugs.
 func TestFilterCirclesOverlapMixedLarge(t *testing.T) {
-	tile := tileBounds{MinX: 0, MinY: 0, MaxX: 0.5, MaxY: 0.5}
+	tile := UVBounds{MinX: 0, MinY: 0, MaxX: 0.5, MaxY: 0.5}
 
 	const n = 37 // deliberately not a multiple of any lane width
 	circles := make([]Circle, n)
@@ -229,7 +319,7 @@ func TestFilterCirclesOverlapMixedLarge(t *testing.T) {
 // calls with different-sized groups, guarding against stale pooled buffer
 // contents leaking between calls.
 func TestFilterPoolReuseAcrossCalls(t *testing.T) {
-	tile := tileBounds{MinX: 0, MinY: 0, MaxX: 1, MaxY: 1}
+	tile := UVBounds{MinX: 0, MinY: 0, MaxX: 1, MaxY: 1}
 
 	// One Renderer's pools reused across calls with different-sized groups,
 	// so the small group sub-slices the big group's pooled buffers.
