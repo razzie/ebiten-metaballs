@@ -159,9 +159,11 @@ go run ./examples/helloworld
 go run ./examples/manycircles
 go run ./examples/demogif
 go run ./examples/bridges
+go run ./examples/physics
 ```
 
 - `helloworld` uses `MetaballShader` directly.
 - `manycircles` demonstrates renderer tiling with many moving circles.
 - `demogif` renders moving clustered circles to gif; its captured output is shown above.
 - `bridges` demonstrates moving clustered circles and bridges.
+- `physics` uses the [softbody package](examples/physics/softbody) for shared circle collisions, damped outer shells, and a hexagonal spatial grid. Hold the left mouse button to attract all red metaballs, middle for greens, and right for blues. Attraction continuously follows the cursor while the button is held.
