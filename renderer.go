@@ -12,7 +12,7 @@ import (
 	"github.com/hajimehoshi/ebiten/v2/vector"
 	"github.com/razzie/ebiten-metaballs/internal/bitset"
 	"github.com/razzie/ebiten-metaballs/internal/pool"
-	"golang.org/x/sync/errgroup"
+	"github.com/razzie/ebiten-metaballs/internal/workergroup"
 )
 
 // RendererConfig configures a Renderer: a pool of shaders for different
@@ -325,18 +325,14 @@ func (r *Renderer) DrawAt(dst *ebiten.Image, groups []Group, xform UVTransform, 
 	total := r.cfg.RootCols * r.cfg.RootRows
 
 	if r.cfg.Workers > 1 {
-		var g errgroup.Group
-		sem := make(chan struct{}, r.cfg.Workers)
+		wg := workergroup.New(r.cfg.Workers)
 		for idx := 0; idx < total; idx++ {
-			g.Go(func() error {
-				return r.drawTile(target, groups, renderXform, rootTile(idx), 0, &stats, sem)
-			})
+			go r.drawTile(target, groups, renderXform, rootTile(idx), 0, &stats, wg.TakeJob())
 		}
-		err = g.Wait()
+		err = wg.Wait()
 	} else {
 		for idx := 0; idx < total; idx++ {
-			if drawErr := r.drawTile(target, groups, renderXform, rootTile(idx), 0, &stats, nil); drawErr != nil {
-				err = drawErr
+			if err = r.drawTile(target, groups, renderXform, rootTile(idx), 0, &stats, nil); err != nil {
 				break
 			}
 		}
@@ -373,11 +369,11 @@ func (r *Renderer) drawTile(
 	tile UVBounds,
 	depth int,
 	stats *Stats,
-	sem chan struct{},
-) error {
-	if sem != nil {
-		sem <- struct{}{}
-		defer func() { <-sem }()
+	j *workergroup.Job,
+) (err error) {
+	if j != nil {
+		j.Start()
+		defer j.Done(&err)
 	}
 
 	// Cheap counting pass: decides tier/subdivision without materializing
@@ -414,9 +410,15 @@ func (r *Renderer) drawTile(
 				{midX, midY, tile.MaxX, tile.MaxY},
 			}
 
-			for _, child := range children {
-				if err := r.drawTile(dst, groups, xform, child, depth+1, stats, sem); err != nil {
-					return err
+			if j == nil {
+				for _, child := range children {
+					if err = r.drawTile(dst, groups, xform, child, depth+1, stats, nil); err != nil {
+						return err
+					}
+				}
+			} else {
+				for _, child := range children {
+					go r.drawTile(dst, groups, xform, child, depth+1, stats, j.Fork())
 				}
 			}
 
