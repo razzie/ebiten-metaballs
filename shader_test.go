@@ -1,6 +1,7 @@
 package metaballs
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -131,5 +132,23 @@ func TestShaderRejectsSceneExceedingTotalCapacity(t *testing.T) {
 				t.Fatalf("expected capacity error, got %v", err)
 			}
 		})
+	}
+}
+
+func TestMetaballShaderCapacityVariants(t *testing.T) {
+	for _, edge := range []bool{false, true} {
+		for mask := 0; mask < 8; mask++ {
+			t.Run(fmt.Sprintf("edge=%t/capacities=%d", edge, mask), func(t *testing.T) {
+				cfg := ShaderConfig{ShaderCapacity: ShaderCapacity{Groups: 1 + mask/2, Circles: 2 + mask, Bridges: mask & 1}, ShaderCommonConfig: ShaderCommonConfig{SmoothK: 0.02}}
+				if edge {
+					cfg.LightDirX, cfg.EdgeThickness = 1, 0.01
+				}
+				shader, err := NewMetaballShader(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				shader.shader.Deallocate()
+			})
+		}
 	}
 }
