@@ -13,14 +13,21 @@ func luma(c vec3) float {
 	return dot(c, vec3(0.299, 0.587, 0.114))
 }
 
+func sample(pos vec2) vec4 {
+	// Extend the boundary pixels so out-of-bounds samples do not fade the
+	// canvas border toward transparent black.
+	origin := imageSrc0Origin()
+	return imageSrc0At(clamp(pos, origin+vec2(0.5), origin+imageSrc0Size()-vec2(0.5)))
+}
+
 func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
 	// Center + diagonal neighbours.
-	rgbM := imageSrc0At(srcPos).rgb
+	rgbM := sample(srcPos).rgb
 
-	rgbNW := imageSrc0At(srcPos + vec2(-1, -1)).rgb
-	rgbNE := imageSrc0At(srcPos + vec2( 1, -1)).rgb
-	rgbSW := imageSrc0At(srcPos + vec2(-1,  1)).rgb
-	rgbSE := imageSrc0At(srcPos + vec2( 1,  1)).rgb
+	rgbNW := sample(srcPos + vec2(-1, -1)).rgb
+	rgbNE := sample(srcPos + vec2( 1, -1)).rgb
+	rgbSW := sample(srcPos + vec2(-1,  1)).rgb
+	rgbSE := sample(srcPos + vec2( 1,  1)).rgb
 
 	lumaM  := luma(rgbM)
 	lumaNW := luma(rgbNW)
@@ -59,21 +66,22 @@ func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
 		vec2(fxaaSpanMax),
 	)
 
+	// Filter premultiplied RGB and alpha together to preserve transparency.
 	// First candidate: two samples close to the edge centre.
-	rgbA := 0.5 * (
-		imageSrc0At(srcPos + dir*(1.0/3.0-0.5)).rgb +
-		imageSrc0At(srcPos + dir*(2.0/3.0-0.5)).rgb)
+	rgbaA := 0.5 * (
+		sample(srcPos + dir*(1.0/3.0-0.5)) +
+		sample(srcPos + dir*(2.0/3.0-0.5)))
 
 	// Second candidate: extend further along the edge.
-	rgbB := rgbA*0.5 + 0.25*(
-		imageSrc0At(srcPos + dir*(0.0/3.0-0.5)).rgb +
-		imageSrc0At(srcPos + dir*(3.0/3.0-0.5)).rgb)
+	rgbaB := rgbaA*0.5 + 0.25*(
+		sample(srcPos + dir*(0.0/3.0-0.5)) +
+		sample(srcPos + dir*(3.0/3.0-0.5)))
 
-	lumaB := luma(rgbB)
+	lumaB := luma(rgbaB.rgb)
 
 	if lumaB < lumaMin || lumaB > lumaMax {
-		return vec4(rgbA, 1)
+		return rgbaA
 	}
 
-	return vec4(rgbB, 1)
+	return rgbaB
 }
