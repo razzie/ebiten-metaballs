@@ -159,8 +159,8 @@ func NewGame() (*Game, error) {
 	// capacities scale with circle capacities since each cluster chain has
 	// one bridge fewer than its circle count.
 	tiers := []metaballs.ShaderCapacity{
-		{MainCircles: 16, MainBridges: 8, OtherCircles: 16, OtherBridges: 8},
-		{MainCircles: 32, MainBridges: 16, OtherCircles: 32, OtherBridges: 16},
+		{Groups: 3, Circles: 32, Bridges: 16},
+		{Groups: 3, Circles: 64, Bridges: 32},
 	}
 
 	renderer, err := metaballs.NewRenderer(metaballs.RendererConfig{

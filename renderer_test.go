@@ -245,11 +245,8 @@ func TestProbeMaterializeAgree(t *testing.T) {
 	}
 	fg := filtered[0]
 
-	if len(fg.Circles) != cap.MainCircles || len(fg.Circles) != cap.OtherCircles {
-		t.Errorf("circle count mismatch: probe main=%d other=%d materialize=%d", cap.MainCircles, cap.OtherCircles, len(fg.Circles))
-	}
-	if len(fg.Bridges) != cap.MainBridges || len(fg.Bridges) != cap.OtherBridges {
-		t.Errorf("bridge count mismatch: probe main=%d other=%d materialize=%d", cap.MainBridges, cap.OtherBridges, len(fg.Bridges))
+	if got := CapacityForGroups(filtered); got != cap {
+		t.Fatalf("probe capacity %v differs from materialized %v", cap, got)
 	}
 
 	// Circle 0 (directly overlapping) and circle 2 (pulled in via the
@@ -344,5 +341,40 @@ func TestFilterPoolReuseAcrossCalls(t *testing.T) {
 			t.Fatalf("expected 1 circle included, got %d groups / %d circles", len(filtered), len(filtered[0].Circles))
 		}
 		release()
+	}
+}
+
+func TestClipGroupsToTotalCapacity(t *testing.T) {
+	groups := []Group{
+		{Circles: make([]Circle, 3), Bridges: []Bridge{{A: 0, B: 2}, {A: 0, B: 1}}},
+		{Circles: make([]Circle, 2)},
+	}
+	dropped := clipGroupsToTier(groups, ShaderCapacity{Groups: 1, Circles: 2, Bridges: 2})
+	if dropped != 3 || len(groups[0].Circles) != 2 || len(groups[1].Circles) != 0 {
+		t.Fatalf("incorrect circle clipping: dropped %d, groups %v", dropped, groups)
+	}
+	if len(groups[0].Bridges) != 1 || groups[0].Bridges[0].B != 1 {
+		t.Fatalf("dangling bridge survived: %v", groups[0].Bridges)
+	}
+	if err := validateGroups(groups); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPickTierCountsGroupsAndTotals(t *testing.T) {
+	r := &Renderer{cfg: RendererConfig{Tiers: []ShaderCapacity{{Groups: 1, Circles: 8, Bridges: 2}, {Groups: 3, Circles: 16, Bridges: 4}}}}
+	for _, tt := range []struct {
+		capacity ShaderCapacity
+		want     int
+	}{
+		{ShaderCapacity{Groups: 1, Circles: 8, Bridges: 2}, 0},
+		{ShaderCapacity{Groups: 2, Circles: 2}, 1},
+		{ShaderCapacity{Groups: 1, Circles: 9}, 1},
+		{ShaderCapacity{Groups: 4, Circles: 4}, -1},
+		{ShaderCapacity{Groups: 1, Circles: 1, Bridges: 5}, -1},
+	} {
+		if got := r.pickTier(tt.capacity); got != tt.want {
+			t.Fatalf("capacity %v: tier %d, want %d", tt.capacity, got, tt.want)
+		}
 	}
 }

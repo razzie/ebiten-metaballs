@@ -87,8 +87,8 @@ func NewGame() (*Game, error) {
 	// Capacity tiers: shader pool from small (cheap, common case for sparse
 	// tiles) up to large (rare, dense tiles after subdivision).
 	tiers := []metaballs.ShaderCapacity{
-		{MainCircles: 32, OtherCircles: 32},
-		{MainCircles: 64, OtherCircles: 64},
+		{Groups: 3, Circles: 64},
+		{Groups: 3, Circles: 128},
 	}
 
 	renderer, err := metaballs.NewRenderer(metaballs.RendererConfig{

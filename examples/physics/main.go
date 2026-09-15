@@ -64,16 +64,16 @@ func NewGame() (*Game, error) {
 
 	renderer, err := metaballs.NewRenderer(metaballs.RendererConfig{
 		Common: metaballs.ShaderCommonConfig{
-			SmoothK:       0.02,
+			SmoothK:       0.06,
 			LightDirX:     1,
 			LightDirY:     -1,
 			EdgeThickness: 0.008,
 			FxaaEnabled:   true,
 		},
 		Tiers: []metaballs.ShaderCapacity{
-			{MainCircles: 16, OtherCircles: 32},
+			{Groups: 3, Circles: 48},
 			// Fit the entire world even when clicks bring all colors together.
-			{MainCircles: circlesPerGroup, OtherCircles: 2 * circlesPerGroup},
+			{Groups: 3, Circles: 3 * circlesPerGroup},
 		},
 		RootCols:    2,
 		RootRows:    2,

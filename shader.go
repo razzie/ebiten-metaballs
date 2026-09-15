@@ -51,33 +51,26 @@ func formatKageVec2(x, y float32) string {
 	return fmt.Sprintf("vec2(%s, %s)", formatKageFloat(x), formatKageFloat(y))
 }
 
-// shaderPools recycles the packed-uniform float32 buffers a MetaballShader
-// builds every drawPass, sized once from the shader's fixed ShaderCapacity.
+// shaderPools recycles one packed scene per draw, including dense group IDs.
 type shaderPools struct {
-	mainCircles      pool.SlicePool[float32]
-	otherCircles     pool.SlicePool[float32]
-	mainBridgeEnds   pool.SlicePool[float32]
-	mainBridgeRadii  pool.SlicePool[float32]
-	otherBridgeEnds  pool.SlicePool[float32]
-	otherBridgeRadii pool.SlicePool[float32]
-	uniforms         sync.Pool // map[string]any
+	circles     pool.SlicePool[float32]
+	bridgeEnds  pool.SlicePool[float32]
+	bridgeRadii pool.SlicePool[float32]
+	groupColors pool.SlicePool[float32]
+	uniforms    sync.Pool
 }
 
 func (p *shaderPools) init(capacity ShaderCapacity) {
-	p.mainCircles.Init(capacity.MainCircles * 4)
-	p.otherCircles.Init(capacity.OtherCircles * 4)
-	p.mainBridgeEnds.Init(capacity.MainBridges * 4)
-	p.mainBridgeRadii.Init(capacity.MainBridges * 3)
-	p.otherBridgeEnds.Init(capacity.OtherBridges * 4)
-	p.otherBridgeRadii.Init(capacity.OtherBridges * 3)
-	p.uniforms.New = func() any {
-		return make(map[string]any)
-	}
+	p.circles.Init(capacity.Circles * 4)
+	p.bridgeEnds.Init(capacity.Bridges * 4)
+	p.bridgeRadii.Init(capacity.Bridges * 4)
+	p.groupColors.Init(capacity.Groups * 4)
+	p.uniforms.New = func() any { return make(map[string]any) }
 }
 
 // MetaballShader renders metaballs and, when FxaaEnabled, post-processes them
 // with FXAA via a single cached offscreen buffer. That buffer is mutable,
-// lazily-(re)sized state, so an FxaaEnabled shader's Draw*/DrawScaledAt calls
+// lazily-(re)sized state, so an FxaaEnabled shader's Draw/DrawAt calls
 // must not run concurrently on the same instance.
 type MetaballShader struct {
 	shader    *ebiten.Shader
@@ -88,8 +81,7 @@ type MetaballShader struct {
 }
 
 func NewMetaballShader(config ShaderConfig) (*MetaballShader, error) {
-	if config.MainCircles <= 0 || config.MainBridges < 0 ||
-		config.OtherCircles < 0 || config.OtherBridges < 0 || config.SmoothK <= 0 {
+	if config.Groups <= 0 || config.Circles <= 0 || config.Bridges < 0 || config.SmoothK <= 0 {
 		return nil, fmt.Errorf("invalid shader config: %+v", config)
 	}
 
@@ -152,39 +144,36 @@ func (s *MetaballShader) offscreenFor(w, h int) *ebiten.Image {
 	return s.offscreen
 }
 
-// packCircles packs circles into vec4(x, y, radius, unused) entries using a
-// pooled buffer, padded with zero entries up to p's default length so the
-// uniform array length matches the shader. release must be called once the
-// returned slice is no longer needed.
-func packCircles(out *[]float32, circles []Circle) {
+// packCircles stores (x, y, radius, group ID) for every circle.
+func packCircles(out []float32, circles []Circle, group int) {
 	for i, c := range circles {
-		(*out)[i*4], (*out)[i*4+1], (*out)[i*4+2] = c.X, c.Y, c.Radius
+		out[i*4], out[i*4+1], out[i*4+2], out[i*4+3] = c.X, c.Y, c.Radius, float32(group)
 	}
 }
 
-// packBridges packs bridges into vec4(a.x, a.y, b.x, b.y) ends and
-// vec3(radiusA, radiusMiddle, radiusB) radii, using pooled buffers padded up
-// to endsPool/radiiPool's default length. release is non-nil (and must
-// still be called) even when err is returned.
-func packBridges(ends, radii *[]float32, circles []Circle, bridges []Bridge) (err error) {
-	for i, br := range bridges {
-		if br.A < 0 || br.A >= len(circles) ||
-			br.B < 0 || br.B >= len(circles) {
-			return fmt.Errorf("invalid bridge indices: %d -> %d", br.A, br.B)
-		}
-
-		a := circles[br.A]
-		b := circles[br.B]
-
-		(*ends)[i*4], (*ends)[i*4+1], (*ends)[i*4+2], (*ends)[i*4+3] = a.X, a.Y, b.X, b.Y
-		(*radii)[i*3], (*radii)[i*3+1], (*radii)[i*3+2] = a.Radius/2, br.MiddleRadius, b.Radius/2
+// packBridges stores endpoints and (radiusA, radiusMiddle, radiusB, group ID).
+// Bridge indices are local to their group, and are validated before packing.
+func packBridges(ends, radii []float32, circles []Circle, bridges []Bridge, group int) {
+	for i, b := range bridges {
+		a, c := circles[b.A], circles[b.B]
+		ends[i*4], ends[i*4+1], ends[i*4+2], ends[i*4+3] = a.X, a.Y, c.X, c.Y
+		radii[i*4], radii[i*4+1], radii[i*4+2], radii[i*4+3] = a.Radius/2, b.MiddleRadius, c.Radius/2, float32(group)
 	}
+}
 
+// validateGroups also protects the renderer's bridge filtering from bad indices.
+func validateGroups(groups []Group) error {
+	for i, g := range groups {
+		for _, b := range g.Bridges {
+			if b.A < 0 || b.A >= len(g.Circles) || b.B < 0 || b.B >= len(g.Circles) {
+				return fmt.Errorf("group %d: invalid bridge indices: %d -> %d", i, b.A, b.B)
+			}
+		}
+	}
 	return nil
 }
 
-// Draw renders each group in its own pass, using the remaining groups
-// combined as the "other" field to drive the squeezing effect.
+// Draw evaluates all groups in one metaball pass, followed by optional FXAA.
 func (s *MetaballShader) Draw(dst *ebiten.Image, groups []Group, xform UVTransform) error {
 	return s.DrawAt(dst, groups, xform, image.Point{})
 }
@@ -196,12 +185,21 @@ func (s *MetaballShader) DrawAt(dst *ebiten.Image, groups []Group, xform UVTrans
 	if xform.scale[0] <= 0 || xform.scale[1] <= 0 {
 		return fmt.Errorf("uv scale must be positive: %v", xform.scale)
 	}
+	if err := validateGroups(groups); err != nil {
+		return err
+	}
+	capacity := CapacityForGroups(groups)
+	if capacity.Groups > s.config.Groups || capacity.Circles > s.config.Circles || capacity.Bridges > s.config.Bridges {
+		return fmt.Errorf("metaball counts exceed shader capacity: groups %d/%d, circles %d/%d, bridges %d/%d", capacity.Groups, s.config.Groups, capacity.Circles, s.config.Circles, capacity.Bridges, s.config.Bridges)
+	}
+	if capacity.Circles == 0 {
+		return nil
+	}
 	// Map destination-local pixels back to the untranslated scene. Keep the
 	// destination origin even when rendering into a zero-origin FXAA buffer.
 	pixelOrigin := dst.Bounds().Min.Sub(offset)
 
-	// FXAA needs the fully-composited image, so all group passes render into
-	// an offscreen buffer first and only the final antialiased result reaches dst.
+	// FXAA filters the completed scene in an offscreen buffer.
 	target := dst
 	if s.fxaa != nil {
 		w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
@@ -209,13 +207,7 @@ func (s *MetaballShader) DrawAt(dst *ebiten.Image, groups []Group, xform UVTrans
 		target.Clear()
 	}
 
-	for i, g := range groups {
-		other := combineGroups(groups, i)
-
-		if err := s.drawPass(target, g, other, g.Color, xform, pixelOrigin); err != nil {
-			return err
-		}
-	}
+	s.drawScene(target, groups, capacity, xform, pixelOrigin)
 
 	if s.fxaa != nil {
 		var transform ebiten.GeoM
@@ -230,83 +222,50 @@ func (s *MetaballShader) DrawAt(dst *ebiten.Image, groups []Group, xform UVTrans
 	return nil
 }
 
-func (s *MetaballShader) drawPass(
-	dst *ebiten.Image,
-	main Group,
-	other Group,
-	color ebiten.ColorScale,
-	xform UVTransform,
-	pixelOrigin image.Point,
-) error {
-	if len(main.Circles) > s.config.MainCircles ||
-		len(main.Bridges) > s.config.MainBridges ||
-		len(other.Circles) > s.config.OtherCircles ||
-		len(other.Bridges) > s.config.OtherBridges {
-		return fmt.Errorf(
-			"metaball counts exceed shader capacity: main circles %d/%d, main bridges %d/%d, other circles %d/%d, other bridges %d/%d",
-			len(main.Circles), s.config.MainCircles,
-			len(main.Bridges), s.config.MainBridges,
-			len(other.Circles), s.config.OtherCircles,
-			len(other.Bridges), s.config.OtherBridges,
-		)
-	}
+// drawScene packs each primitive once and submits one full-scene draw call.
+func (s *MetaballShader) drawScene(dst *ebiten.Image, groups []Group, capacity ShaderCapacity, xform UVTransform, pixelOrigin image.Point) {
+	circles := s.pools.circles.Get()
+	ends := s.pools.bridgeEnds.Get()
+	radii := s.pools.bridgeRadii.Get()
+	colors := s.pools.groupColors.Get()
+	defer s.pools.circles.Put(circles)
+	defer s.pools.bridgeEnds.Put(ends)
+	defer s.pools.bridgeRadii.Put(radii)
+	defer s.pools.groupColors.Put(colors)
+	packGroups(*circles, *ends, *radii, *colors, groups)
 
 	uniforms := s.pools.uniforms.Get().(map[string]any)
 	defer s.pools.uniforms.Put(uniforms)
 	uniforms["UvScale"] = xform.scale[:]
 	uniforms["UvOffset"] = xform.offset[:]
 	uniforms["PixelOrigin"] = []float32{float32(pixelOrigin.X), float32(pixelOrigin.Y)}
-	uniforms["MainColor"] = []float32{color.R(), color.G(), color.B(), color.A()}
-
-	mainCircles := s.pools.mainCircles.Get()
-	packCircles(mainCircles, main.Circles)
-	defer s.pools.mainCircles.Put(mainCircles)
-	uniforms["MainCircleCount"] = len(main.Circles)
-	uniforms["MainCircles"] = *mainCircles
-
-	if s.config.MainBridges > 0 {
-		mainEnds := s.pools.mainBridgeEnds.Get()
-		mainRadii := s.pools.mainBridgeRadii.Get()
-		err := packBridges(mainEnds, mainRadii, main.Circles, main.Bridges)
-		defer s.pools.mainBridgeEnds.Put(mainEnds)
-		defer s.pools.mainBridgeRadii.Put(mainRadii)
-		if err != nil {
-			return err
-		}
-		uniforms["MainBridgeCount"] = len(main.Bridges)
-		uniforms["MainBridgeEnds"] = *mainEnds
-		uniforms["MainBridgeRadii"] = *mainRadii
+	uniforms["CircleCount"] = capacity.Circles
+	uniforms["Circles"] = *circles
+	uniforms["GroupCount"] = capacity.Groups
+	uniforms["GroupColors"] = *colors
+	if s.config.Bridges > 0 {
+		uniforms["BridgeCount"] = capacity.Bridges
+		uniforms["BridgeEnds"] = *ends
+		uniforms["BridgeRadii"] = *radii
 	}
-
-	if s.config.OtherCircles > 0 {
-		otherCirclesBuf := s.pools.otherCircles.Get()
-		packCircles(otherCirclesBuf, other.Circles)
-		defer s.pools.otherCircles.Put(otherCirclesBuf)
-		uniforms["OtherCircleCount"] = len(other.Circles)
-		uniforms["OtherCircles"] = *otherCirclesBuf
-	}
-
-	if s.config.OtherBridges > 0 {
-		otherEnds := s.pools.otherBridgeEnds.Get()
-		otherRadii := s.pools.otherBridgeRadii.Get()
-		err := packBridges(otherEnds, otherRadii, other.Circles, other.Bridges)
-		defer s.pools.otherBridgeEnds.Put(otherEnds)
-		defer s.pools.otherBridgeRadii.Put(otherRadii)
-		if err != nil {
-			return err
-		}
-		uniforms["OtherBridgeCount"] = len(other.Bridges)
-		uniforms["OtherBridgeEnds"] = *otherEnds
-		uniforms["OtherBridgeRadii"] = *otherRadii
-	}
-
 	var transform ebiten.GeoM
 	transform.Translate(float64(dst.Bounds().Min.X), float64(dst.Bounds().Min.Y))
-	w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
-	dst.DrawRectShader(w, h, s.shader, &ebiten.DrawRectShaderOptions{
-		GeoM:     transform,
-		Uniforms: uniforms,
-	})
+	dst.DrawRectShader(dst.Bounds().Dx(), dst.Bounds().Dy(), s.shader, &ebiten.DrawRectShaderOptions{GeoM: transform, Uniforms: uniforms})
+}
 
-	return nil
+// Empty groups do not consume a uniform slot. Every group ID is dense and
+// indexes the color array packed in the same traversal.
+func packGroups(circles, ends, radii, colors []float32, groups []Group) {
+	ci, bi, gi := 0, 0, 0
+	for _, g := range groups {
+		if len(g.Circles) == 0 {
+			continue
+		}
+		packCircles(circles[ci*4:], g.Circles, gi)
+		packBridges(ends[bi*4:], radii[bi*4:], g.Circles, g.Bridges, gi)
+		colors[gi*4], colors[gi*4+1], colors[gi*4+2], colors[gi*4+3] = g.Color.R(), g.Color.G(), g.Color.B(), g.Color.A()
+		ci += len(g.Circles)
+		bi += len(g.Bridges)
+		gi++
+	}
 }

@@ -1,6 +1,6 @@
 # ebiten-metaballs
 
-`ebiten-metaballs` is a Go package for rendering 2D metaballs with Ebiten v2. Metaballs are defined as circles, with optional bridges between circle pairs. Groups provide independent colors; each group is rendered as a main field while the other groups drive the squeezing/intersection field.
+`ebiten-metaballs` is a Go package for rendering 2D metaballs with Ebiten v2. Metaballs are defined as circles, with optional bridges between circle pairs. Groups provide independent colors. All circles and bridges are evaluated in one shader pass, with separate fields for each group and smooth contacts between colors.
 
 ![Demo GIF](examples/demogif/demo.gif)
 
@@ -34,11 +34,17 @@ type Group struct {
 
 Circle positions and radii are expressed in UV units. `Bridge.A` and `Bridge.B` are indices into the same group's `Circles` slice. Both indices must be valid. A bridge uses the endpoint circles' radii and its own `MiddleRadius` to form a continuous field between the endpoints.
 
+Circles and bridges within each group merge through a smooth minimum. After evaluating every primitive once, the shader finds the two lowest group distances in one scan. It squeezes the closest group using `mainDistance - smin(otherDistance, 0, SmoothK/2)`. Competing colors stay separate: the opposing distance is a minimum of group fields, never a smooth union of all opposing circles.
+
+Contacts follow the blended group shapes directly. There is no additional pressure field or nearest-circle lookup. Lighting uses the analytic gradient of the squeezed distance. The blended radius only limits edge thickness; it no longer biases contact placement. Isolated overlapping circles therefore yield by equal depths, and a small circle buried in a deeper competing field can disappear. A large `SmoothK` can also erase small regions through contact rounding.
+
+Primitives are blended in their supplied order without a per-pixel distance cutoff. A primitive farther than `SmoothK` can still affect the contour through intermediate blends; cutting it off introduces notches and lighting jumps. The tiled renderer conservatively pads each group's primitives by `(primitiveCount + 0.5) * SmoothK`, including the contact-rounding margin. Large groups or large `SmoothK` values therefore reduce culling efficiency and may require larger shader tiers. Two equal circles can still have a straight contact, and junctions between three colors can have corners. Exactly tied group fields share an empty boundary; completely coincident identical groups cannot remain individually visible.
+
 `NewColorScale(r, g, b, a)` constructs an `ebiten.ColorScale` for a group.
 
 ## Direct shader rendering
 
-`MetaballShader` renders all groups directly in one or more shader passes. Create its fixed shader array capacities from the input groups:
+`MetaballShader` renders all groups in one metaball pass, followed by an optional FXAA pass. Create its fixed shader array capacities from the input groups:
 
 ```go
 groups := []metaballs.Group{
@@ -63,22 +69,25 @@ if err != nil {
 	return err
 }
 
-if err := shader.Draw(dst, groups); err != nil {
+xform, _ := metaballs.NewCenteredUVTransform(dst.Bounds().Dx(), dst.Bounds().Dy())
+if err := shader.Draw(dst, groups, xform); err != nil {
 	return err
 }
 ```
 
 `ShaderCapacity` contains compile-time array sizes:
 
-- `MainCircles` and `MainBridges` must fit the largest individual group.
-- `OtherCircles` and `OtherBridges` must fit the combined contents of all other groups.
-- `MainCircles` must be positive. The other capacity fields may be zero.
+- `Groups` must fit the number of nonempty groups.
+- `Circles` and `Bridges` must fit the **totals across all groups**.
+- `Groups` and `Circles` must be positive; `Bridges` may be zero.
+
+These replace the previous `MainCircles`, `OtherCircles`, `MainBridges`, and `OtherBridges` fields. `CapacityForGroups` supplies the new counts automatically. Explicit renderer tiers must use the new total capacities.
 
 `CapacityForGroups` computes these bounds. Shader construction compiles an embedded Kage template; it fails if `SmoothK <= 0`, capacities are invalid, bridge indices are invalid during drawing, or edge-shading configuration is invalid.
 
 `ShaderCommonConfig` is shared by all generated shader tiers:
 
-- `SmoothK` controls smooth-min blending and must be positive.
+- `SmoothK` controls shape blending and contact rounding. It must be positive.
 - `LightDirX` and `LightDirY` select the edge-light direction. `(0, 0)` disables edge shading.
 - `EdgeThickness` must be positive when edge shading is enabled.
 - `FxaaEnabled` enables FXAA post-processing. `FxaaReduceMin`, `FxaaReduceMul`, and `FxaaSpanMax` tune the FXAA edge-detection thresholds (defaults: 128, 8, 8).
@@ -100,14 +109,14 @@ err := shader.Draw(dst, groups, xform)
 
 ## Tiled renderer
 
-`Renderer` filters groups against tiles, skips empty tiles, subdivides tiles that exceed a shader tier, and selects the smallest tier whose capacities fit the tile. If a tile still exceeds the largest tier at `MaxDepth`, the renderer draws it with that tier and clips excess circles.
+`Renderer` filters groups against tiles, skips empty tiles, subdivides tiles that exceed a shader tier, and selects the smallest tier whose capacities fit the tile. If a tile still exceeds the largest tier at `MaxDepth`, the renderer draws it with that tier and clips excess circles/groups and bridges whose endpoints were removed. Each drawn tile uses one metaball pass.
 
 ```go
 renderer, err := metaballs.NewRenderer(metaballs.RendererConfig{
 	Common: metaballs.ShaderCommonConfig{SmoothK: 0.03},
 	Tiers: []metaballs.ShaderCapacity{
-		{MainCircles: 16, OtherCircles: 16},
-		{MainCircles: 32, OtherCircles: 32},
+		{Groups: 3, Circles: 32},
+		{Groups: 3, Circles: 64},
 	},
 	RootCols:    1,
 	RootRows:    1,
@@ -119,7 +128,7 @@ if err != nil {
 	return err
 }
 
-stats, err := renderer.Draw(dst, groups)
+stats, err := renderer.Draw(dst, groups, xform)
 ```
 
 `RendererConfig` fields:
