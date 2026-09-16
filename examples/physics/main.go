@@ -10,7 +10,7 @@ import (
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
 	metaballs "github.com/razzie/ebiten-metaballs"
-	"github.com/razzie/ebiten-metaballs/examples/physics/softbody"
+	"github.com/razzie/ebiten-metaballs/softbody"
 )
 
 const (
