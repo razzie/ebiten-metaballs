@@ -56,6 +56,7 @@ func pairSpanKernel(p *particleData, i, start, end int, cfg Config) (ax, ay, dvx
 
 	var sx, sy, svx, svy, scx, scy [maxSIMDFloat32Lanes]float32
 	var nearZero [maxSIMDFloat32Lanes]int32
+	var sameGroup [maxSIMDFloat32Lanes]float32
 
 	j := start
 	for ; j+lanes <= end; j += lanes {
@@ -88,6 +89,19 @@ func pairSpanKernel(p *particleData, i, start, end int, cfg Config) (ax, ay, dvx
 		rel := vxi.Sub(vxj).Mul(nx).Add(vyi.Sub(vyj).Mul(ny))
 
 		force := penetration.Mul(compression).Mul(k).Sub(rel.Mul(c)).Max(zero).Masked(active)
+		if cfg.AttractionRange > 0 && cfg.AttractionStrength > 0 {
+			for lane := range lanes {
+				sameGroup[lane] = 0
+				if p.group[i] == p.group[j+lane] {
+					sameGroup[lane] = 1
+				}
+			}
+			groupMask := simd.LoadFloat32s(sameGroup[:lanes]).Greater(zero)
+			gap := dist.Sub(outer).Max(zero)
+			falloff := one.Sub(gap.Div(simd.BroadcastFloat32s(cfg.AttractionRange))).Max(zero)
+			pull := falloff.Mul(falloff).Mul(simd.BroadcastFloat32s(cfg.AttractionStrength))
+			force = force.Sub(pull.Masked(groupMask.And(nonZero)))
+		}
 		accel := force.Mul(invMassI)
 		fx := nx.Mul(accel)
 		fy := ny.Mul(accel)

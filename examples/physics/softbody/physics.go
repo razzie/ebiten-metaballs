@@ -185,7 +185,12 @@ func pairScalar(p *particleData, i, j int, cfg Config) (ax, ay, dvx, dvy, cx, cy
 	dy := p.y[i] - p.y[j]
 	d2 := dx*dx + dy*dy
 	outer := p.outer[i] + p.outer[j]
-	if d2 >= outer*outer {
+	attract := cfg.AttractionRange > 0 && cfg.AttractionStrength > 0 && p.group[i] == p.group[j]
+	cutoff := outer
+	if attract {
+		cutoff += cfg.AttractionRange
+	}
+	if d2 >= cutoff*cutoff {
 		return
 	}
 
@@ -203,6 +208,16 @@ func pairScalar(p *particleData, i, j int, cfg Config) (ax, ay, dvx, dvy, cx, cy
 		d = float32(math.Sqrt(float64(d2)))
 	}
 	nx, ny := dx/d, dy/d
+
+	if attract && d2 > collisionEpsilon*collisionEpsilon {
+		falloff := max(1-max(d-outer, 0)/cfg.AttractionRange, 0)
+		accel := cfg.AttractionStrength * falloff * falloff * p.invMass[i]
+		ax -= nx * accel
+		ay -= ny * accel
+	}
+	if d >= outer {
+		return
+	}
 
 	inner := p.inner[i] + p.inner[j]
 	thickness := max(outer-inner, collisionEpsilon)

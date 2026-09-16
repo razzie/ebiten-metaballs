@@ -58,6 +58,12 @@ type Config struct {
 	CoreCorrection float32
 	LinearDamping  float32
 
+	// AttractionRange is the maximum gap between outer shells for same-group
+	// attraction. Strength is the force at contact, fading quadratically with gap.
+	// Both must be positive to enable attraction; zero leaves it disabled.
+	AttractionRange    float32
+	AttractionStrength float32
+
 	ClickRadius  float32
 	ClickImpulse float32
 }

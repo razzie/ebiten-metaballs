@@ -15,12 +15,19 @@ The outer shells use a nonlinear spring-damper response. The inner cores use
 position correction plus a normal collision impulse, so the simulation does not
 have to rely on an arbitrarily stiff penalty spring to prevent collapse.
 
+Optional same-group attraction uses `Config.AttractionRange` as the maximum gap
+between outer shells and `Config.AttractionStrength` as the force at contact.
+The force fades quadratically to zero across that gap; shell and core collision
+responses still prevent collapse. Both values must be positive to enable it.
+The physics example uses a short range of `0.015` and strength of `0.3`.
+
 ## Broad phase
 
 Particles are assigned to the nearest center of a triangular lattice, producing
 hexagonal Voronoi cells. The lattice rows are staggered. The neighbor stencil is
-computed conservatively from the largest outer radius, so differently sized
-circles are not missed even when the configured grid spacing is small.
+computed conservatively from the largest outer radius plus the attraction range,
+so differently sized circles are not missed even when the configured grid spacing
+is small.
 
 The state is counting-sorted into cell order every substep. That makes all
 particles belonging to a cell contiguous in the SoA arrays, which is useful for

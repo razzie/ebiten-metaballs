@@ -18,6 +18,7 @@ const (
 	ticksPerSecond  = 60
 	circlesPerGroup = 48
 	spawnColumns    = 12
+	baseRadius      = 0.025
 )
 
 type Game struct {
@@ -33,8 +34,11 @@ func NewGame() (*Game, error) {
 	cfg := softbody.DefaultConfig()
 	cfg.Workers = 4
 	cfg.Substeps = 4
-	// Attract the whole group regardless of the window's aspect ratio.
-	cfg.ClickRadius = float32(math.Inf(1))
+	// Same colors cohere only within a tiny gap between their outer shells.
+	cfg.AttractionRange = 0.015
+	cfg.AttractionStrength = 0.3
+	// Attraction is strongest near the cursor and falls to zero at this radius.
+	cfg.ClickRadius = 0.5
 	// Register an impulse every tick while held, for a steady attraction force.
 	cfg.ClickImpulse = 1.5 / ticksPerSecond
 	world := softbody.New(cfg)
@@ -44,7 +48,8 @@ func NewGame() (*Game, error) {
 	const count = 3 * circlesPerGroup
 	const rows = (count + spawnColumns - 1) / spawnColumns
 	for i := range count {
-		outer := 0.022 + rand.Float32()*0.006
+		size := 0.5 + rand.Float32()
+		outer := baseRadius * size
 		angle := rand.Float64() * 2 * math.Pi
 		speed := 0.025 + rand.Float32()*0.025
 		_, err := world.AddCircle(softbody.CircleSpec{
@@ -54,8 +59,9 @@ func NewGame() (*Game, error) {
 			VY:          speed * float32(math.Sin(angle)),
 			InnerRadius: outer * 0.6,
 			OuterRadius: outer,
-			Mass:        1,
-			Group:       softbody.Group((i + i/spawnColumns) % 3),
+			// Constant density: mass scales with area, with unit mass at baseRadius.
+			Mass:  size * size,
+			Group: softbody.Group((i + i/spawnColumns) % 3),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("add circle %d: %w", i, err)

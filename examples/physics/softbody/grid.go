@@ -80,8 +80,11 @@ func (s *State) ensureGridGeometry() {
 
 	// Conservative stencil: a Voronoi hex has circumradius spacing/sqrt(3).
 	// If cell centers are farther apart than interactionCutoff + 2*circumradius,
-	// no pair in those two cells can possibly touch outer shells.
+	// no pair in those two cells can possibly collide or attract.
 	interactionCutoff := 2 * s.maxOuter
+	if s.cfg.AttractionRange > 0 && s.cfg.AttractionStrength > 0 {
+		interactionCutoff += s.cfg.AttractionRange
+	}
 	circumradius := spacing / float32(sqrt3)
 	centerLimit := interactionCutoff + 2*circumradius
 	rings := int(math.Ceil(float64(centerLimit/spacing))) + 1
