@@ -21,6 +21,12 @@ The force fades quadratically to zero across that gap; shell and core collision
 responses still prevent collapse. Both values must be positive to enable it.
 The physics example uses a short range of `0.015` and strength of `0.3`.
 
+Hold Space in the physics example to push nearby circles away from the mouse
+pointer, regardless of group. `State.Repel(x, y)` uses `Config.ClickImpulse` and
+`Config.ClickRadius`, with quadratic falloff to zero at the radius. Circles
+exactly at the source stay unchanged because they have no outward direction.
+Call it each tick for a sustained force, scaling `ClickImpulse` by the tick duration.
+
 ## Broad phase
 
 Particles are assigned to the nearest center of a triangular lattice, producing

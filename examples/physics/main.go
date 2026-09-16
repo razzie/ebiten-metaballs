@@ -37,7 +37,7 @@ func NewGame() (*Game, error) {
 	// Same colors cohere only within a tiny gap between their outer shells.
 	cfg.AttractionRange = 0.015
 	cfg.AttractionStrength = 0.3
-	// Attraction is strongest near the cursor and falls to zero at this radius.
+	// Cursor attraction and repulsion fall to zero at this radius.
 	cfg.ClickRadius = 0.5
 	// Register an impulse every tick while held, for a steady attraction force.
 	cfg.ClickImpulse = 1.5 / ticksPerSecond
@@ -128,6 +128,9 @@ func (g *Game) Update() error {
 	mx, my := ebiten.CursorPosition()
 	x, y := g.xform.ScreenToUV(mx, my)
 	if x >= g.bounds.MinX && x < g.bounds.MaxX && y >= g.bounds.MinY && y < g.bounds.MaxY {
+		if ebiten.IsKeyPressed(ebiten.KeySpace) {
+			g.world.Repel(x, y)
+		}
 		for _, binding := range [...]struct {
 			button ebiten.MouseButton
 			target softbody.MouseButton
@@ -153,7 +156,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		return
 	}
 	ebitenutil.DebugPrint(screen, fmt.Sprintf(
-		"Hold to attract: left = red | middle = green | right = blue\n%d circles | FPS: %.1f | TPS: %.1f",
+		"Hold to attract: left = red | middle = green | right = blue\nHold Space to repel all colors near the cursor\n%d circles | FPS: %.1f | TPS: %.1f",
 		g.world.Len(), ebiten.ActualFPS(), ebiten.ActualTPS(),
 	))
 }

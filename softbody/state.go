@@ -50,6 +50,28 @@ func (s *State) Config() Config { return s.cfg }
 
 func (s *State) Len() int { return s.p.len() }
 
+// Repel pushes circles of every group away from (x, y). It uses ClickImpulse and
+// ClickRadius, with quadratic falloff to zero at the radius. Circles exactly at
+// the source stay unchanged because they have no outward direction.
+// Call from the simulation goroutine, once per tick while input is held.
+func (s *State) Repel(x, y float32) {
+	if s.cfg.ClickRadius <= 0 || s.cfg.ClickImpulse <= 0 {
+		return
+	}
+	for i := range s.p.len() {
+		dx, dy := s.p.x[i]-x, s.p.y[i]-y
+		d2 := dx*dx + dy*dy
+		if d2 <= collisionEpsilon*collisionEpsilon || d2 >= s.cfg.ClickRadius*s.cfg.ClickRadius {
+			continue
+		}
+		d := float32(math.Sqrt(float64(d2)))
+		falloff := 1 - d/s.cfg.ClickRadius
+		impulse := s.cfg.ClickImpulse * falloff * falloff * s.p.invMass[i]
+		s.p.vx[i] += dx / d * impulse
+		s.p.vy[i] += dy / d * impulse
+	}
+}
+
 // SetBounds resizes the world and immediately confines existing cores to it.
 // Like Step, it must be called from the simulation goroutine.
 func (s *State) SetBounds(b Bounds) error {
