@@ -1,4 +1,4 @@
-# softbody-demo
+# softbody
 
 A rendering-independent 2D circle physics state with rectangular world bounds,
 defaulting to `[0,1] x [0,1]`. Call `SetBounds` on the simulation goroutine to
@@ -9,7 +9,7 @@ Each circle has:
 
 - a hard `InnerRadius`
 - a compressible `OuterRadius`
-- mass, velocity, and one of three groups: red, green, blue
+- mass, velocity, and an application-defined `Group` identifier
 
 The outer shells use a nonlinear spring-damper response. The inner cores use
 position correction plus a normal collision impulse, so the simulation does not
@@ -19,13 +19,24 @@ Optional same-group attraction uses `Config.AttractionRange` as the maximum gap
 between outer shells and `Config.AttractionStrength` as the force at contact.
 The force fades quadratically to zero across that gap; shell and core collision
 responses still prevent collapse. Both values must be positive to enable it.
-The physics example uses a short range of `0.015` and strength of `0.3`.
 
-Hold Space in the physics example to push nearby circles away from the mouse
-pointer, regardless of group. `State.Repel(x, y)` uses `Config.ClickImpulse` and
-`Config.ClickRadius`, with quadratic falloff to zero at the radius. Circles
-exactly at the source stay unchanged because they have no outward direction.
-Call it each tick for a sustained force, scaling `ClickImpulse` by the tick duration.
+External attraction and repulsion use `State.QueueRadialImpulse`. Each impulse
+specifies a source in world coordinates, radius, signed strength, and optional
+list of target groups. Positive strength pushes outward; negative strength pulls
+inward. Empty groups select every circle, including group zero. Strength is
+momentum, divided by circle mass to obtain the velocity change, with quadratic
+falloff to zero at the radius. A positive infinite radius disables falloff.
+Circles at the source stay unchanged because they have no radial direction.
+Sources may lie outside the world bounds and are not clamped when bounds change.
+
+Impulses are consumed once by the next `Step` with a positive timestep and at
+least one circle, regardless of the number of substeps. Multiple impulses add
+together. For a sustained force, queue an impulse each tick with strength equal
+to force times tick duration. Nonpositive or NaN radii, nonfinite coordinates or
+strengths, and zero strengths are ignored.
+
+Colors, input bindings, and cursor interaction settings belong to the caller;
+the physics example defines these in `examples/physics/main.go`.
 
 ## Broad phase
 
@@ -78,14 +89,17 @@ _, err := world.AddCircle(softbody.CircleSpec{
     InnerRadius: 0.018,
     OuterRadius: 0.028,
     Mass:        1,
-    Group:       softbody.Red,
+    Group:       42,
 })
 if err != nil {
     panic(err)
 }
 
-// Left attracts red, right attracts blue, middle attracts green.
-world.RegisterClick(softbody.MouseLeft, 0.5, 0.5)
+// Pull group 42 toward a point on the next step.
+world.QueueRadialImpulse(softbody.RadialImpulse{
+    X: 0.5, Y: 0.5, Radius: 0.5, Strength: -0.35,
+    Groups: []softbody.Group{42},
+})
 
 world.Step(1.0 / 60.0)
 
@@ -93,11 +107,11 @@ circles := world.Snapshot(nil)
 _ = circles
 ```
 
-A registered click is consumed by the next `Step` and acts as an instantaneous
-attraction impulse. Call `RegisterClick` repeatedly if later input handling wants
-"held button" behavior.
-Set `Config.ClickRadius` to positive infinity for attraction across the entire
-world without distance falloff.
+`QueueRadialImpulse` is safe concurrently with `Step` and copies the group list
+before returning. Other state APIs, including `Snapshot`, must not run
+concurrently with simulation mutations.
 
-`RegisterClick` is safe concurrently with `Step`. Other state-mutating APIs are
-intended to be called from the simulation/update goroutine.
+This API replaces `RegisterClick` and `Repel`. The former `Config.ClickRadius`
+and `Config.ClickImpulse` settings are now supplied per impulse as `Radius` and
+`Strength`. `Group` accepts any `uint32` value; there are no predefined colors
+or mouse buttons.

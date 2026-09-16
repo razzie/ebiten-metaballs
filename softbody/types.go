@@ -5,21 +5,22 @@ import (
 	"sync"
 )
 
-type Group uint8
+// Group is an application-defined identifier used for attraction and filtering.
+// Every value is valid; groups have no built-in colors or input bindings.
+type Group uint32
 
-const (
-	Red Group = iota
-	Green
-	Blue
-)
-
-type MouseButton uint8
-
-const (
-	MouseLeft MouseButton = iota
-	MouseRight
-	MouseMiddle
-)
+// RadialImpulse changes circle velocities around a point in world coordinates.
+// Strength is momentum: positive pushes outward, negative pulls inward. Its
+// magnitude falls quadratically to zero at Radius and is divided by circle mass.
+// A positive infinite Radius disables distance falloff. Circles at the source
+// are unchanged because they have no radial direction.
+type RadialImpulse struct {
+	X, Y     float32
+	Radius   float32
+	Strength float32
+	// Groups selects the affected groups. Empty means all groups.
+	Groups []Group
+}
 
 type CircleSpec struct {
 	X, Y        float32
@@ -63,9 +64,6 @@ type Config struct {
 	// Both must be positive to enable attraction; zero leaves it disabled.
 	AttractionRange    float32
 	AttractionStrength float32
-
-	ClickRadius  float32
-	ClickImpulse float32
 }
 
 func DefaultConfig() Config {
@@ -77,14 +75,7 @@ func DefaultConfig() Config {
 		Restitution:    0.08,
 		CoreCorrection: 0.8,
 		LinearDamping:  0.25,
-		ClickRadius:    0.18,
-		ClickImpulse:   0.35,
 	}
-}
-
-type click struct {
-	x, y  float32
-	group Group
 }
 
 type particleData struct {
@@ -138,6 +129,6 @@ type State struct {
 	dvx, dvy     []float32
 	corrX, corrY []float32
 
-	clickMu sync.Mutex
-	clicks  []click
+	impulseMu sync.Mutex
+	impulses  []RadialImpulse
 }

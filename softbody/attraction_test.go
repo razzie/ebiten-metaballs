@@ -14,17 +14,17 @@ func TestGroupAttraction(t *testing.T) {
 		strength float32
 		wantPull bool
 	}{
-		{"near same group", Red, .0075, .3, true},
-		{"near other group", Blue, .0075, .3, false},
-		{"outside range", Red, .016, .3, false},
-		{"disabled", Red, .0075, 0, false},
+		{"near same group", 0, .0075, .3, true},
+		{"near other group", 1000, .0075, .3, false},
+		{"outside range", 0, .016, .3, false},
+		{"disabled", 0, .0075, 0, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := DefaultConfig()
 			cfg.AttractionRange, cfg.AttractionStrength = .015, tt.strength
 			cfg.Substeps = 1
 			s := New(cfg)
-			for i, group := range []Group{Red, tt.group} {
+			for i, group := range []Group{0, tt.group} {
 				_, err := s.AddCircle(CircleSpec{
 					X: .4 + float32(i)*(.05+tt.gap), Y: .5,
 					InnerRadius: .015, OuterRadius: .025,

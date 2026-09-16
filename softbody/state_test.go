@@ -11,7 +11,7 @@ func TestResizeBounds(t *testing.T) {
 	if err := s.SetBounds(wide); err != nil {
 		t.Fatal(err)
 	}
-	_, err := s.AddCircle(CircleSpec{X: 1.8, Y: .5, VX: 2, InnerRadius: .03, OuterRadius: .05, Group: Blue})
+	_, err := s.AddCircle(CircleSpec{X: 1.8, Y: .5, VX: 2, InnerRadius: .03, OuterRadius: .05, Group: 1000})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,18 +104,17 @@ func TestCollisionsOutsideUnitSquare(t *testing.T) {
 func TestAttractionOutsideUnitSquare(t *testing.T) {
 	for _, target := range []float32{-1.5, 2.5} {
 		cfg := DefaultConfig()
-		cfg.ClickRadius = float32(math.Inf(1))
 		s := New(cfg)
 		if err := s.SetBounds(Bounds{MinX: -2, MaxX: 3, MaxY: 1}); err != nil {
 			t.Fatal(err)
 		}
 		// Put the circle between the target and the old unit-square boundary.
 		x := (target + .5) / 2
-		_, err := s.AddCircle(CircleSpec{X: x, Y: .5, InnerRadius: .01, OuterRadius: .02, Group: Green})
+		_, err := s.AddCircle(CircleSpec{X: x, Y: .5, InnerRadius: .01, OuterRadius: .02, Group: 17})
 		if err != nil {
 			t.Fatal(err)
 		}
-		s.RegisterClick(MouseMiddle, target, .5)
+		s.QueueRadialImpulse(RadialImpulse{X: target, Y: .5, Radius: float32(math.Inf(1)), Strength: -.35, Groups: []Group{17}})
 		s.Step(1.0 / 60)
 		if c := s.Snapshot(nil)[0]; c.VX*(target-x) <= 0 {
 			t.Fatalf("circle was not attracted toward resized-world target %g: %+v", target, c)
@@ -125,8 +124,8 @@ func TestAttractionOutsideUnitSquare(t *testing.T) {
 
 func TestCollisionSeparatesCores(t *testing.T) {
 	s := New(DefaultConfig())
-	_, _ = s.AddCircle(CircleSpec{X: .48, Y: .5, InnerRadius: .04, OuterRadius: .07, Group: Red})
-	_, _ = s.AddCircle(CircleSpec{X: .52, Y: .5, InnerRadius: .04, OuterRadius: .07, Group: Blue})
+	_, _ = s.AddCircle(CircleSpec{X: .48, Y: .5, InnerRadius: .04, OuterRadius: .07, Group: 0})
+	_, _ = s.AddCircle(CircleSpec{X: .52, Y: .5, InnerRadius: .04, OuterRadius: .07, Group: 1000})
 	for range 20 {
 		s.Step(1.0 / 120.0)
 	}
@@ -140,33 +139,33 @@ func TestCollisionSeparatesCores(t *testing.T) {
 	}
 }
 
-func TestClickTargetsOnlyGroup(t *testing.T) {
+func TestImpulseTargetsOnlyGroup(t *testing.T) {
 	s := New(DefaultConfig())
-	_, _ = s.AddCircle(CircleSpec{X: .4, Y: .5, InnerRadius: .01, OuterRadius: .02, Group: Red})
-	_, _ = s.AddCircle(CircleSpec{X: .4, Y: .6, InnerRadius: .01, OuterRadius: .02, Group: Blue})
-	s.RegisterClick(MouseLeft, .5, .5)
+	_, _ = s.AddCircle(CircleSpec{X: .4, Y: .5, InnerRadius: .01, OuterRadius: .02, Group: 0})
+	_, _ = s.AddCircle(CircleSpec{X: .4, Y: .6, InnerRadius: .01, OuterRadius: .02, Group: 1000})
+	s.QueueRadialImpulse(RadialImpulse{X: .5, Y: .5, Radius: .18, Strength: -.35, Groups: []Group{0}})
 	s.Step(1.0 / 60.0)
 	c := s.Snapshot(nil)
-	var redVX, blueVX float32
+	var targetVX, otherVX float32
 	for _, p := range c {
-		if p.Group == Red {
-			redVX = p.VX
+		if p.Group == 0 {
+			targetVX = p.VX
 		}
-		if p.Group == Blue {
-			blueVX = p.VX
+		if p.Group == 1000 {
+			otherVX = p.VX
 		}
 	}
-	if redVX <= 0 {
-		t.Fatalf("red was not attracted: vx=%f", redVX)
+	if targetVX <= 0 {
+		t.Fatalf("target group was not attracted: vx=%f", targetVX)
 	}
-	if blueVX != 0 {
-		t.Fatalf("blue was affected by red click: vx=%f", blueVX)
+	if otherVX != 0 {
+		t.Fatalf("other group was affected by impulse: vx=%f", otherVX)
 	}
 }
 
 func TestBoundariesContainHardCore(t *testing.T) {
 	s := New(DefaultConfig())
-	_, _ = s.AddCircle(CircleSpec{X: .06, Y: .5, VX: -10, InnerRadius: .05, OuterRadius: .08, Group: Green})
+	_, _ = s.AddCircle(CircleSpec{X: .06, Y: .5, VX: -10, InnerRadius: .05, OuterRadius: .08, Group: 17})
 	for range 4 {
 		s.Step(1.0 / 60.0)
 	}

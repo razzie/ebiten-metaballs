@@ -105,32 +105,30 @@ func TestWallCoreResponse(t *testing.T) {
 	}
 }
 
-func TestClickResponseFalloffAndExclusions(t *testing.T) {
+func TestRadialImpulseResponseFalloffAndExclusions(t *testing.T) {
 	for _, tt := range []struct {
 		name               string
 		radius, impulse, x float32
 		group              Group
 		want               float32
 	}{
-		{"quadratic falloff and mass", .5, 2, .75, Red, .25},
-		{"opposite direction", .5, 2, .25, Red, -.25},
-		{"at center", .5, 2, .5, Red, 0},
-		{"at radius", .5, 2, 1, Red, 0},
-		{"outside radius", .5, 2, 1.25, Red, 0},
-		{"other group", .5, 2, .75, Blue, 0},
-		{"disabled radius", -1, 2, .75, Red, 0},
-		{"disabled impulse", .5, 0, .75, Red, 0},
-		{"infinite radius", float32(math.Inf(1)), 2, .75, Red, 1},
+		{"quadratic falloff and mass", .5, 2, .75, 0, .25},
+		{"opposite direction", .5, 2, .25, 0, -.25},
+		{"at center", .5, 2, .5, 0, 0},
+		{"at radius", .5, 2, 1, 0, 0},
+		{"outside radius", .5, 2, 1.25, 0, 0},
+		{"other group", .5, 2, .75, 1000, 0},
+		{"disabled impulse", .5, 0, .75, 0, 0},
+		{"infinite radius", float32(math.Inf(1)), 2, .75, 0, 1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			s := New(DefaultConfig())
-			s.cfg.ClickRadius, s.cfg.ClickImpulse = tt.radius, tt.impulse
-			if _, err := s.AddCircle(CircleSpec{X: .5, Y: .5, InnerRadius: .01, OuterRadius: .02, Mass: 2, Group: Red}); err != nil {
+			if _, err := s.AddCircle(CircleSpec{X: .5, Y: .5, InnerRadius: .01, OuterRadius: .02, Mass: 2, Group: 0}); err != nil {
 				t.Fatal(err)
 			}
-			vx, vy := s.clickResponse(0, []click{{x: tt.x, y: .5, group: tt.group}})
+			vx, vy := s.radialImpulseResponse(0, []RadialImpulse{{X: tt.x, Y: .5, Radius: tt.radius, Strength: -tt.impulse, Groups: []Group{tt.group}}})
 			if vx != tt.want || vy != 0 {
-				t.Fatalf("click response = (%g, %g), want (%g, 0)", vx, vy, tt.want)
+				t.Fatalf("radial impulse response = (%g, %g), want (%g, 0)", vx, vy, tt.want)
 			}
 		})
 	}

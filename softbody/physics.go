@@ -2,12 +2,13 @@ package softbody
 
 import (
 	"math"
+	"slices"
 	"sync/atomic"
 )
 
 const collisionEpsilon = float32(1e-7)
 
-func (s *State) solveCells(clicks []click) {
+func (s *State) solveCells(impulses []RadialImpulse) {
 	active := s.grid.active
 	if len(active) == 0 {
 		return
@@ -16,7 +17,7 @@ func (s *State) solveCells(clicks []click) {
 	workers := min(s.cfg.Workers, len(active))
 	if workers <= 1 {
 		for _, cid := range active {
-			s.solveCell(cid, clicks)
+			s.solveCell(cid, impulses)
 		}
 		return
 	}
@@ -30,7 +31,7 @@ func (s *State) solveCells(clicks []click) {
 				if k >= len(active) {
 					break
 				}
-				s.solveCell(active[k], clicks)
+				s.solveCell(active[k], impulses)
 			}
 			done <- struct{}{}
 		}()
@@ -40,7 +41,7 @@ func (s *State) solveCells(clicks []click) {
 	}
 }
 
-func (s *State) solveCell(cid int, clicks []click) {
+func (s *State) solveCell(cid int, impulses []RadialImpulse) {
 	own := s.grid.cells[cid]
 	cq, cr := s.grid.coord(cid)
 
@@ -97,7 +98,7 @@ func (s *State) solveCell(cid int, clicks []click) {
 		cx += we
 		cy += wf
 
-		ca, cb := s.clickResponse(i, clicks)
+		ca, cb := s.radialImpulseResponse(i, impulses)
 		dvx += ca
 		dvy += cb
 
@@ -144,27 +145,22 @@ func (s *State) wallResponse(i int) (ax, ay, dvx, dvy, cx, cy float32) {
 	return
 }
 
-func (s *State) clickResponse(i int, clicks []click) (dvx, dvy float32) {
-	if len(clicks) == 0 || s.cfg.ClickRadius <= 0 || s.cfg.ClickImpulse == 0 {
-		return 0, 0
-	}
-	for _, c := range clicks {
-		if s.p.group[i] != c.group {
+func (s *State) radialImpulseResponse(i int, impulses []RadialImpulse) (dvx, dvy float32) {
+	for _, impulse := range impulses {
+		if len(impulse.Groups) > 0 && !slices.Contains(impulse.Groups, s.p.group[i]) {
 			continue
 		}
-		dx := c.x - s.p.x[i]
-		dy := c.y - s.p.y[i]
+		dx := s.p.x[i] - impulse.X
+		dy := s.p.y[i] - impulse.Y
 		d2 := dx*dx + dy*dy
-		r2 := s.cfg.ClickRadius * s.cfg.ClickRadius
-		if d2 <= collisionEpsilon*collisionEpsilon || d2 >= r2 {
+		if d2 <= collisionEpsilon*collisionEpsilon || d2 >= impulse.Radius*impulse.Radius {
 			continue
 		}
 		d := float32(math.Sqrt(float64(d2)))
-		falloff := 1 - d/s.cfg.ClickRadius
-		falloff *= falloff
-		impulse := s.cfg.ClickImpulse * falloff * s.p.invMass[i]
-		dvx += dx / d * impulse
-		dvy += dy / d * impulse
+		falloff := 1 - d/impulse.Radius
+		deltaSpeed := impulse.Strength * falloff * falloff * s.p.invMass[i]
+		dvx += dx / d * deltaSpeed
+		dvy += dy / d * deltaSpeed
 	}
 	return
 }

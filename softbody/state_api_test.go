@@ -16,7 +16,6 @@ func TestNewConfig(t *testing.T) {
 		ShellStiffness: 12, ShellDamping: 3, Restitution: .5,
 		CoreCorrection: .7, LinearDamping: .2,
 		AttractionRange: .3, AttractionStrength: 2,
-		ClickRadius: .4, ClickImpulse: .6,
 	}
 	clamped := zeroDefaults
 	clamped.Workers, clamped.Substeps = 1, 1
@@ -45,7 +44,7 @@ func TestNewConfig(t *testing.T) {
 }
 
 func TestAddCircleValidation(t *testing.T) {
-	valid := CircleSpec{X: .5, Y: .5, InnerRadius: .1, OuterRadius: .2, Mass: 2, Group: Green}
+	valid := CircleSpec{X: .5, Y: .5, InnerRadius: .1, OuterRadius: .2, Mass: 2, Group: 17}
 	for _, tt := range []struct {
 		name   string
 		change func(*CircleSpec)
@@ -54,7 +53,6 @@ func TestAddCircleValidation(t *testing.T) {
 		{"negative inner radius", func(c *CircleSpec) { c.InnerRadius = -.1 }},
 		{"outer smaller than inner", func(c *CircleSpec) { c.OuterRadius = .05 }},
 		{"diameter exceeds width", func(c *CircleSpec) { c.OuterRadius = .6 }},
-		{"invalid group", func(c *CircleSpec) { c.Group = Blue + 1 }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			s := New(DefaultConfig())
@@ -173,58 +171,58 @@ func TestSnapshotPreservesIdentityThroughReordering(t *testing.T) {
 	}
 }
 
-func TestClicksConsumedOnceAcrossSubsteps(t *testing.T) {
-	for _, button := range []MouseButton{MouseLeft, MouseRight, MouseMiddle} {
-		cfg := DefaultConfig()
-		cfg.Substeps, cfg.LinearDamping = 4, -1
-		cfg.ClickRadius, cfg.ClickImpulse = .5, 2
-		s := New(cfg)
-		group := map[MouseButton]Group{MouseLeft: Red, MouseRight: Blue, MouseMiddle: Green}[button]
-		if _, err := s.AddCircle(CircleSpec{X: .5, Y: .5, InnerRadius: .01, OuterRadius: .02, Mass: 2, Group: group}); err != nil {
-			t.Fatal(err)
-		}
-		s.RegisterClick(button, .75, .5)
-		before := s.Snapshot(nil)
-		s.Step(0)
-		s.Step(-1)
-		if !slices.Equal(before, s.Snapshot(nil)) {
-			t.Fatal("nonpositive timestep changed state")
-		}
-		for step := range 2 {
-			s.Step(.01)
-			c := s.Snapshot(nil)[0]
-			// Half the click radius gives 1/4 strength, divided by mass 2.
-			if c.VX != .25 || c.VY != 0 {
-				t.Fatalf("button %d, step %d: velocity (%g, %g), want (.25, 0)", button, step, c.VX, c.VY)
+func TestImpulsesConsumedOnceAcrossSubsteps(t *testing.T) {
+	for _, strength := range []float32{-2, 2} {
+		for _, group := range []Group{0, 17, 1000} {
+			cfg := DefaultConfig()
+			cfg.Substeps, cfg.LinearDamping = 4, -1
+			s := New(cfg)
+			impulse := RadialImpulse{X: .75, Y: .5, Radius: .5, Strength: strength, Groups: []Group{group}}
+			s.QueueRadialImpulse(impulse)
+			s.Step(.01) // Empty steps retain queued impulses.
+			if _, err := s.AddCircle(CircleSpec{X: .5, Y: .5, InnerRadius: .01, OuterRadius: .02, Mass: 2, Group: group}); err != nil {
+				t.Fatal(err)
+			}
+			before := s.Snapshot(nil)
+			s.Step(0)
+			s.Step(-1)
+			if !slices.Equal(before, s.Snapshot(nil)) {
+				t.Fatal("queued impulse or nonpositive timestep changed state")
+			}
+			for step := range 2 {
+				s.Step(.01)
+				c := s.Snapshot(nil)[0]
+				// Half the radius gives 1/4 strength, divided by mass 2.
+				if c.VX != -strength/8 || c.VY != 0 {
+					t.Fatalf("group %d, step %d: velocity (%g, %g)", group, step, c.VX, c.VY)
+				}
 			}
 		}
 	}
 }
 
-func TestClickCoordinatesFollowBounds(t *testing.T) {
-	s := New(DefaultConfig())
-	s.RegisterClick(MouseButton(255), .5, .5)
-	if len(s.consumeClicks()) != 0 {
-		t.Fatal("invalid button queued a click")
+func TestImpulseSourceUnaffectedByBounds(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.LinearDamping = -1
+	s := New(cfg)
+	if _, err := s.AddCircle(CircleSpec{X: .5, Y: .5, InnerRadius: .01, OuterRadius: .02}); err != nil {
+		t.Fatal(err)
 	}
-	s.RegisterClick(MouseLeft, -10, 10)
-	if got := s.consumeClicks(); !slices.Equal(got, []click{{x: 0, y: 1, group: Red}}) {
-		t.Fatalf("clamped click = %+v", got)
-	}
-	s.RegisterClick(MouseRight, .9, .1)
+	s.QueueRadialImpulse(RadialImpulse{X: 1.5, Y: .5, Radius: 2, Strength: -1})
 	if err := s.SetBounds(Bounds{MinX: .2, MinY: .2, MaxX: .8, MaxY: .8}); err != nil {
 		t.Fatal(err)
 	}
-	if got := s.consumeClicks(); !slices.Equal(got, []click{{x: .8, y: .2, group: Blue}}) {
-		t.Fatalf("click after resize = %+v", got)
+	s.Step(.01)
+	if c := s.Snapshot(nil)[0]; c.VX != .25 || c.VY != 0 {
+		t.Fatalf("source was clamped to bounds: %+v", c)
 	}
 }
 
-func TestRegisterClickConcurrentWithStep(t *testing.T) {
+func TestQueueRadialImpulseConcurrentWithStep(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.ClickRadius = float32(math.Inf(1))
+	cfg.LinearDamping = -1
 	s := New(cfg)
-	if _, err := s.AddCircle(CircleSpec{X: .5, Y: .5, InnerRadius: .01, OuterRadius: .02, Group: Blue}); err != nil {
+	if _, err := s.AddCircle(CircleSpec{X: .5, Y: .5, InnerRadius: .01, OuterRadius: .02, Group: 1000}); err != nil {
 		t.Fatal(err)
 	}
 	var wg sync.WaitGroup
@@ -233,7 +231,7 @@ func TestRegisterClickConcurrentWithStep(t *testing.T) {
 		wg.Go(func() {
 			<-start
 			for range 100 {
-				s.RegisterClick(MouseLeft, .75, .5)
+				s.QueueRadialImpulse(RadialImpulse{X: 0, Y: .5, Radius: float32(math.Inf(1)), Strength: .001})
 			}
 		})
 	}
@@ -243,10 +241,10 @@ func TestRegisterClickConcurrentWithStep(t *testing.T) {
 	}
 	wg.Wait()
 	s.Step(.001)
-	if len(s.consumeClicks()) != 0 {
-		t.Fatal("Step left clicks queued")
+	if len(s.consumeImpulses()) != 0 {
+		t.Fatal("Step left impulses queued")
 	}
-	if c := s.Snapshot(nil)[0]; c.X != .5 || c.Y != .5 || c.VX != 0 || c.VY != 0 {
-		t.Fatalf("concurrent clicks affected another group: %+v", c)
+	if c := s.Snapshot(nil)[0]; math.Abs(float64(c.VX-.4)) > 1e-5 || c.VY != 0 {
+		t.Fatalf("concurrent impulses lost or duplicated: %+v", c)
 	}
 }

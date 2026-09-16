@@ -25,12 +25,6 @@ func New(cfg Config) *State {
 	if cfg.LinearDamping == 0 {
 		cfg.LinearDamping = d.LinearDamping
 	}
-	if cfg.ClickRadius == 0 {
-		cfg.ClickRadius = d.ClickRadius
-	}
-	if cfg.ClickImpulse == 0 {
-		cfg.ClickImpulse = d.ClickImpulse
-	}
 	if cfg.Workers < 1 {
 		cfg.Workers = 1
 	}
@@ -50,28 +44,6 @@ func (s *State) Config() Config { return s.cfg }
 
 func (s *State) Len() int { return s.p.len() }
 
-// Repel pushes circles of every group away from (x, y). It uses ClickImpulse and
-// ClickRadius, with quadratic falloff to zero at the radius. Circles exactly at
-// the source stay unchanged because they have no outward direction.
-// Call from the simulation goroutine, once per tick while input is held.
-func (s *State) Repel(x, y float32) {
-	if s.cfg.ClickRadius <= 0 || s.cfg.ClickImpulse <= 0 {
-		return
-	}
-	for i := range s.p.len() {
-		dx, dy := s.p.x[i]-x, s.p.y[i]-y
-		d2 := dx*dx + dy*dy
-		if d2 <= collisionEpsilon*collisionEpsilon || d2 >= s.cfg.ClickRadius*s.cfg.ClickRadius {
-			continue
-		}
-		d := float32(math.Sqrt(float64(d2)))
-		falloff := 1 - d/s.cfg.ClickRadius
-		impulse := s.cfg.ClickImpulse * falloff * falloff * s.p.invMass[i]
-		s.p.vx[i] += dx / d * impulse
-		s.p.vy[i] += dy / d * impulse
-	}
-}
-
 // SetBounds resizes the world and immediately confines existing cores to it.
 // Like Step, it must be called from the simulation goroutine.
 func (s *State) SetBounds(b Bounds) error {
@@ -86,9 +58,7 @@ func (s *State) SetBounds(b Bounds) error {
 	if b == s.bounds {
 		return nil
 	}
-	s.clickMu.Lock()
 	s.bounds = b
-	s.clickMu.Unlock()
 	s.geometryDirty = true
 	for i, radius := range s.p.inner {
 		s.p.x[i], s.p.vx[i] = confine(s.p.x[i], s.p.vx[i], b.MinX+radius, b.MaxX-radius, s.cfg.Restitution)
@@ -109,9 +79,6 @@ func (s *State) AddCircle(c CircleSpec) (uint64, error) {
 	}
 	if c.Mass <= 0 {
 		c.Mass = 1
-	}
-	if c.Group > Blue {
-		return 0, fmt.Errorf("invalid group %d", c.Group)
 	}
 
 	// Keep the hard core in the world. The outer shell may overlap a wall.
@@ -137,38 +104,31 @@ func (s *State) AddCircle(c CircleSpec) (uint64, error) {
 	return id, nil
 }
 
-// RegisterClick is safe to call concurrently with Step. Coordinates use world bounds.
-// The click is consumed by the next Step and acts as an attraction impulse.
-func (s *State) RegisterClick(button MouseButton, x, y float32) {
-	var group Group
-	switch button {
-	case MouseLeft:
-		group = Red
-	case MouseRight:
-		group = Blue
-	case MouseMiddle:
-		group = Green
-	default:
+// QueueRadialImpulse queues an impulse for the next Step with a positive dt and
+// at least one circle. It is applied once, regardless of the number of substeps.
+// Sources are not clamped to world bounds. Nonpositive or NaN radii, nonfinite
+// coordinates or strengths, and zero strengths are ignored.
+// It is safe to call concurrently with Step. Groups is copied before returning.
+func (s *State) QueueRadialImpulse(impulse RadialImpulse) {
+	if !(impulse.Radius > 0) || impulse.Strength == 0 {
 		return
 	}
-
-	s.clickMu.Lock()
-	s.clicks = append(s.clicks, click{x: clamp(x, s.bounds.MinX, s.bounds.MaxX), y: clamp(y, s.bounds.MinY, s.bounds.MaxY), group: group})
-	s.clickMu.Unlock()
+	for _, v := range [...]float32{impulse.X, impulse.Y, impulse.Strength} {
+		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+			return
+		}
+	}
+	impulse.Groups = append([]Group(nil), impulse.Groups...)
+	s.impulseMu.Lock()
+	s.impulses = append(s.impulses, impulse)
+	s.impulseMu.Unlock()
 }
 
-func (s *State) consumeClicks() []click {
-	s.clickMu.Lock()
-	defer s.clickMu.Unlock()
-	if len(s.clicks) == 0 {
-		return nil
-	}
-	out := append([]click(nil), s.clicks...)
-	for i := range out {
-		out[i].x = clamp(out[i].x, s.bounds.MinX, s.bounds.MaxX)
-		out[i].y = clamp(out[i].y, s.bounds.MinY, s.bounds.MaxY)
-	}
-	s.clicks = s.clicks[:0]
+func (s *State) consumeImpulses() []RadialImpulse {
+	s.impulseMu.Lock()
+	defer s.impulseMu.Unlock()
+	out := s.impulses
+	s.impulses = nil
 	return out
 }
 
@@ -196,17 +156,17 @@ func (s *State) Step(dt float32) {
 		return
 	}
 
-	clicks := s.consumeClicks()
+	impulses := s.consumeImpulses()
 	h := dt / float32(s.cfg.Substeps)
 	for sub := 0; sub < s.cfg.Substeps; sub++ {
 		s.rebuildGrid()
 		s.ensureWorkBuffers()
 
-		var subClicks []click
+		var subImpulses []RadialImpulse
 		if sub == 0 {
-			subClicks = clicks
+			subImpulses = impulses
 		}
-		s.solveCells(subClicks)
+		s.solveCells(subImpulses)
 		s.integrate(h)
 	}
 }

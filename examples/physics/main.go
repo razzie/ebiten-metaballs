@@ -19,6 +19,14 @@ const (
 	circlesPerGroup = 48
 	spawnColumns    = 12
 	baseRadius      = 0.025
+	cursorRadius    = 0.5
+	cursorImpulse   = 1.5 / ticksPerSecond
+)
+
+const (
+	red softbody.Group = iota
+	green
+	blue
 )
 
 type Game struct {
@@ -37,10 +45,6 @@ func NewGame() (*Game, error) {
 	// Same colors cohere only within a tiny gap between their outer shells.
 	cfg.AttractionRange = 0.015
 	cfg.AttractionStrength = 0.3
-	// Cursor attraction and repulsion fall to zero at this radius.
-	cfg.ClickRadius = 0.5
-	// Register an impulse every tick while held, for a steady attraction force.
-	cfg.ClickImpulse = 1.5 / ticksPerSecond
 	world := softbody.New(cfg)
 
 	// Start with separated shells and interleave colors in one shared world,
@@ -98,9 +102,9 @@ func NewGame() (*Game, error) {
 		xform:    xform,
 		bounds:   bounds,
 		groups: []metaballs.Group{
-			softbody.Red:   {Color: metaballs.NewColorScale(1, 0.15, 0.15, 1)},
-			softbody.Green: {Color: metaballs.NewColorScale(0.15, 1, 0.25, 1)},
-			softbody.Blue:  {Color: metaballs.NewColorScale(0.15, 0.35, 1, 1)},
+			red:   {Color: metaballs.NewColorScale(1, 0.15, 0.15, 1)},
+			green: {Color: metaballs.NewColorScale(0.15, 1, 0.25, 1)},
+			blue:  {Color: metaballs.NewColorScale(0.15, 0.35, 1, 1)},
 		},
 	}
 	for i := range g.groups {
@@ -129,18 +133,23 @@ func (g *Game) Update() error {
 	x, y := g.xform.ScreenToUV(mx, my)
 	if x >= g.bounds.MinX && x < g.bounds.MaxX && y >= g.bounds.MinY && y < g.bounds.MaxY {
 		if ebiten.IsKeyPressed(ebiten.KeySpace) {
-			g.world.Repel(x, y)
+			g.world.QueueRadialImpulse(softbody.RadialImpulse{
+				X: x, Y: y, Radius: cursorRadius, Strength: cursorImpulse,
+			})
 		}
 		for _, binding := range [...]struct {
 			button ebiten.MouseButton
-			target softbody.MouseButton
+			group  softbody.Group
 		}{
-			{ebiten.MouseButtonLeft, softbody.MouseLeft},
-			{ebiten.MouseButtonMiddle, softbody.MouseMiddle},
-			{ebiten.MouseButtonRight, softbody.MouseRight},
+			{ebiten.MouseButtonLeft, red},
+			{ebiten.MouseButtonMiddle, green},
+			{ebiten.MouseButtonRight, blue},
 		} {
 			if ebiten.IsMouseButtonPressed(binding.button) {
-				g.world.RegisterClick(binding.target, x, y)
+				g.world.QueueRadialImpulse(softbody.RadialImpulse{
+					X: x, Y: y, Radius: cursorRadius, Strength: -cursorImpulse,
+					Groups: []softbody.Group{binding.group},
+				})
 			}
 		}
 	}
