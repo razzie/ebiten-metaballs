@@ -49,6 +49,9 @@ func (g *drawAtTestGame) Update() error {
 
 	for _, edge := range []bool{false, true} {
 		for _, fxaa := range []bool{false, true} {
+			g.t.Run(fmt.Sprintf("borders and joints/edge=%t/fxaa=%t", edge, fxaa), func(t *testing.T) {
+				checkBorderPixels(t, edge, fxaa)
+			})
 			for _, bridges := range []bool{false, true} {
 				g.t.Run(fmt.Sprintf("continuous influence/edge=%t/fxaa=%t/bridges=%t", edge, fxaa, bridges), func(t *testing.T) {
 					checkInfluenceContinuity(t, edge, fxaa, bridges)
@@ -70,6 +73,126 @@ func (g *drawAtTestGame) Update() error {
 		}
 	}
 	return ebiten.Termination
+}
+
+// Called inside the existing GPU test game loop.
+func checkBorderPixels(t *testing.T, lighting, fxaa bool) {
+	t.Helper()
+	cfg := ShaderCommonConfig{SmoothK: 8, BorderThickness: 6, FxaaEnabled: fxaa}
+	if lighting {
+		cfg.LightDirX, cfg.LightDirY, cfg.EdgeThickness = -1, -1, 8
+	}
+	color := NewColorScale(0.7, 0.85, 0.8, 1)
+	circle := []Group{{Circles: []Circle{{X: 64.5, Y: 64.5, Radius: 32}}, Color: color}}
+	pixels := renderBorderPixels(t, circle, cfg, false)
+	pixel := func(p []byte, x, y int) []byte { return p[4*(y*256+x) : 4*(y*256+x)+4] }
+	center, border, outside := pixel(pixels, 64, 64), pixel(pixels, 94, 64), pixel(pixels, 100, 64)
+	if center[3] != 255 || border[3] != 255 || outside[3] != 0 || center[0] <= border[0]*2 {
+		t.Fatalf("expected colored fill, dark inset border and unchanged silhouette: center=%v border=%v outside=%v", center, border, outside)
+	}
+	// Lighting must start at the inset boundary and leave the border flat.
+	if lighting {
+		bright, dark := pixel(pixels, 40, 64), pixel(pixels, 88, 64)
+		if bright[0] <= dark[0]+10 {
+			t.Fatalf("inset fill is not lit: bright=%v dark=%v", bright, dark)
+		}
+	}
+	if !fxaa {
+		// A translucent border must retain the same alpha as its fill.
+		circle[0].Color = NewColorScale(0.35, 0.425, 0.4, 0.5)
+		transparent := renderBorderPixels(t, circle, cfg, false)
+		if a, b := pixel(transparent, 64, 64)[3], pixel(transparent, 94, 64)[3]; a != b || a < 127 || a > 128 {
+			t.Fatalf("border changed group alpha: fill=%d border=%d", a, b)
+		}
+	}
+
+	// Three bridges share a zero-radius joint, with middle radii smaller
+	// than the border thickness producing solid, narrow connectors.
+	groups := []Group{{
+		Circles: []Circle{
+			{X: 128.5, Y: 128.5},
+			{X: 40.5, Y: 128.5, Radius: 24},
+			{X: 200.5, Y: 40.5, Radius: 20},
+			{X: 200.5, Y: 216.5, Radius: 16},
+		},
+		Bridges: []Bridge{{A: 0, B: 1, MiddleRadius: 3}, {A: 0, B: 2, MiddleRadius: 3}, {A: 3, B: 0, MiddleRadius: 6}},
+		Color:   color,
+	}}
+	want := renderBorderPixels(t, groups, cfg, false)
+	joint := pixel(want, 128, 128)
+	if joint[3] != 255 || joint[0] > 70 {
+		t.Fatalf("joint should be solid border without a colored dot: %v", joint)
+	}
+	if !fxaa && pixel(want, 84, 133)[3] != 0 {
+		t.Fatal("border thickness widened the requested bridge middle radius")
+	}
+	for _, end := range groups[0].Circles[1:] {
+		for step := 0; step <= 32; step++ {
+			x := int(128 + (end.X-128.5)*float32(step)/32)
+			y := int(128 + (end.Y-128.5)*float32(step)/32)
+			if p := pixel(want, x, y); p[3] != 255 {
+				t.Fatalf("bridge to %v has a hole at (%d,%d): %v", end, x, y, p)
+			}
+		}
+	}
+	groups[0].Circles[0].Radius = cfg.BorderThickness
+	if got := renderBorderPixels(t, groups, cfg, false); !bytes.Equal(got, want) {
+		t.Fatal("zero-radius and border-radius joints render differently")
+	}
+	groups[0].Circles[0].Radius = 0
+	if got := renderBorderPixels(t, groups, cfg, true); !bytes.Equal(got, want) {
+		t.Fatal("tiled renderer differs from direct bordered rendering")
+	}
+
+	// Make border expansion much larger than the blend padding, to catch
+	// tiles dropping a zero-radius joint or a narrow bridge outside its AABB.
+	cfg.SmoothK, cfg.BorderThickness = 0.01, 12
+	groups = []Group{{
+		Circles: []Circle{{X: 58.5, Y: 58.5}, {X: 58.5, Y: 200.5}},
+		Bridges: []Bridge{{A: 0, B: 1, MiddleRadius: 3}}, Color: color,
+	}, {Circles: []Circle{{X: 76.5, Y: 130.5, Radius: 20}}, Color: NewColorScale(1, 0.5, 0.25, 1)}}
+	want = renderBorderPixels(t, groups, cfg, false)
+	if got := renderBorderPixels(t, groups, cfg, true); !bytes.Equal(got, want) {
+		t.Fatal("tile culling clipped border-expanded joints, bridges, or group contacts")
+	}
+}
+
+func renderBorderPixels(t *testing.T, groups []Group, cfg ShaderCommonConfig, tiled bool) []byte {
+	t.Helper()
+	dst := ebiten.NewImage(256, 256)
+	defer dst.Deallocate()
+	var xf UVTransform
+	xf.SetScale(1, 1)
+	if tiled {
+		r, err := NewRenderer(RendererConfig{Common: cfg, Tiers: []ShaderCapacity{CapacityForGroups(groups)}, RootCols: 4, RootRows: 4, MinTileSize: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.shaders[0].shader.Deallocate()
+		if _, err := r.Draw(dst, groups, xf); err != nil {
+			t.Fatal(err)
+		}
+		if r.fxaa != nil {
+			defer r.fxaa.Deallocate()
+			defer r.offscreen.Deallocate()
+		}
+	} else {
+		s, err := NewMetaballShader(ShaderConfig{ShaderCapacity: CapacityForGroups(groups), ShaderCommonConfig: cfg})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.shader.Deallocate()
+		if err := s.Draw(dst, groups, xf); err != nil {
+			t.Fatal(err)
+		}
+		if s.fxaa != nil {
+			defer s.fxaa.Deallocate()
+			defer s.offscreen.Deallocate()
+		}
+	}
+	pixels := make([]byte, 256*256*4)
+	dst.ReadPixels(pixels)
+	return pixels
 }
 
 // At the center, the three primitive distances are K, 0.4K, and 0.15K.

@@ -580,6 +580,8 @@ func (r *Renderer) prepareGroupsForTile(groups []Group, tile UVBounds) (prep []g
 		// at most K closer to the contour. Keep an additional K/2 for the
 		// positive competing distances used by contact rounding.
 		padding := (float32(len(g.Circles)+len(g.Bridges)) + 0.5) * r.cfg.Common.SmoothK
+		// Bordered joints and narrow bridges can extend beyond their input radii.
+		padding += r.cfg.Common.BorderThickness
 		if !computeIncludedSet(&r.pools, g, tile, included, padding) {
 			continue
 		}

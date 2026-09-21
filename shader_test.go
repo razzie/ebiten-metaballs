@@ -2,6 +2,7 @@ package metaballs
 
 import (
 	"fmt"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -30,10 +31,24 @@ func TestNewMetaballShaderCompilesTemplates(t *testing.T) {
 
 	for name, cfg := range configs {
 		t.Run(name, func(t *testing.T) {
-			if _, err := NewMetaballShader(cfg); err != nil {
-				t.Fatalf("NewMetaballShader(%+v): %v", cfg, err)
+			for _, border := range []float32{0, 0.005} {
+				cfg.BorderThickness = border
+				shader, err := NewMetaballShader(cfg)
+				if err != nil {
+					t.Fatalf("NewMetaballShader(%+v): %v", cfg, err)
+				}
+				shader.shader.Deallocate()
 			}
 		})
+	}
+}
+
+func TestShaderRejectsInvalidBorderThickness(t *testing.T) {
+	for _, border := range []float32{-1, float32(math.NaN()), float32(math.Inf(1)), float32(math.Inf(-1))} {
+		cfg := ShaderConfig{ShaderCapacity: ShaderCapacity{Groups: 1, Circles: 1}, ShaderCommonConfig: ShaderCommonConfig{SmoothK: 0.02, BorderThickness: border}}
+		if _, err := NewMetaballShader(cfg); err == nil || !strings.Contains(err.Error(), "BorderThickness") {
+			t.Fatalf("border %v: expected BorderThickness validation error, got %v", border, err)
+		}
 	}
 }
 

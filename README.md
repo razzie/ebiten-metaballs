@@ -92,9 +92,30 @@ These replace the previous `MainCircles`, `OtherCircles`, `MainBridges`, and `Ot
 - `SmoothK` controls shape blending and contact rounding. It must be positive.
 - `LightDirX` and `LightDirY` select the edge-light direction. `(0, 0)` disables edge shading.
 - `EdgeThickness` must be positive when edge shading is enabled.
+- `BorderThickness` adds an inset border in UV units, using 35% of the group color's RGB and preserving its alpha. It must be finite and nonnegative; zero preserves the original style. Borders work with or without lighting, and lighting follows the inset fill's edge. Circle radii include the border; bridge endpoint radii are clamped to at least the border thickness, while `MiddleRadius` is preserved.
 - `FxaaEnabled` enables FXAA post-processing. `FxaaReduceMin`, `FxaaReduceMul`, and `FxaaSpanMax` tune the FXAA edge-detection thresholds (defaults: 128, 8, 8).
 
 `MetaballShader.Draw` and `MetaballShader.DrawAt` are not safe for concurrent use on the same shader instance when FXAA is enabled, unless it is enabled at the `Renderer` level.
+
+With borders enabled, a circle with `Radius: 0` is a solid joint, equivalent to `Radius: BorderThickness`. Connect any number of bridges to that circle's index to create a shared junction. Features whose blended radius is at most the border thickness stay solid, without a colored center. For example, three bridges can share circle 3:
+
+```go
+group := metaballs.Group{
+	Circles: []metaballs.Circle{
+		{X: 0.2, Y: 0.7, Radius: 0.12},
+		{X: 0.7, Y: 0.2, Radius: 0.06},
+		{X: 0.8, Y: 0.8, Radius: 0.04},
+		{X: 0.5, Y: 0.5, Radius: 0}, // shared joint
+	},
+	Bridges: []metaballs.Bridge{
+		{A: 0, B: 3, MiddleRadius: 0.008},
+		{A: 1, B: 3, MiddleRadius: 0.008},
+		{A: 2, B: 3, MiddleRadius: 0.008},
+	},
+	Color: metaballs.NewColorScale(0.7, 0.85, 0.8, 1),
+}
+// Use SmoothK: 0.03 and BorderThickness: 0.012 in ShaderCommonConfig.
+```
 
 ### UV scaling
 

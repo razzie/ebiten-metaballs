@@ -24,6 +24,12 @@ type ShaderCommonConfig struct {
 	LightDirX, LightDirY float32
 	// Edge thickness for the edge shading. Needs light direction to be non-zero. Must be positive.
 	EdgeThickness float32
+	// BorderThickness draws a darkened inset border in UV units, independently of
+	// lighting. Zero disables borders. Must be finite and nonnegative.
+	// Bridge endpoints have at least this radius; zero-radius circles become
+	// solid joints with this radius. Features with a blended radius at most
+	// this thickness have no colored fill.
+	BorderThickness float32
 	// FxaaEnabled renders all groups to an offscreen buffer and applies FXAA
 	// to it in a final pass to dst. See MetaballShader's doc comment for the
 	// resulting concurrency constraint.
@@ -43,7 +49,9 @@ type ShaderConfig struct {
 }
 
 type Circle struct {
-	X, Y   float32
+	X, Y float32
+	// Radius includes the border. With borders enabled, zero is shorthand for
+	// a solid joint of radius BorderThickness; bridges may share its index.
 	Radius float32
 }
 

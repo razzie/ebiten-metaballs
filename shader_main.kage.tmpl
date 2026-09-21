@@ -7,6 +7,7 @@ const MaxGroups = {{.Groups}}
 const MaxCircles = {{.Circles}}
 {{if gt .Bridges 0}}const MaxBridges = {{.Bridges}}{{end}}
 {{if or .LightDirX .LightDirY}}const EdgeThickness = {{float .EdgeThickness}}{{end}}
+{{if .BorderThickness}}const BorderThickness = {{float .BorderThickness}}{{end}}
 
 var UvScale vec2
 var UvOffset vec2
@@ -48,6 +49,12 @@ func Fragment(dstPos vec4) vec4 {
 			break
 		}
 		circle := Circles[i]
+		{{if .BorderThickness}}
+		// Zero-radius circles are explicit joints, equivalent to border-radius circles.
+		if circle.z == 0.0 {
+			circle.z = BorderThickness
+		}
+		{{end}}
 		if circle.z <= 0.0 {
 			continue
 		}
@@ -62,6 +69,12 @@ func Fragment(dstPos vec4) vec4 {
 		}
 		ends := BridgeEnds[i]
 		radii := BridgeRadii[i]
+		{{if .BorderThickness}}
+		// Retain a solid connector all the way into a joint. Endpoint radii
+		// arrive at half the circle radius; preserve the requested middle radius.
+		radii.x = max(radii.x, BorderThickness)
+		radii.z = max(radii.z, BorderThickness)
+		{{end}}
 		field := sdSplineCapsuleField(uv, ends, radii)
 		if field.w <= 0.0 {
 			continue
@@ -109,6 +122,16 @@ func Fragment(dstPos vec4) vec4 {
 		discard()
 	}
 	color := GroupColors[selected]
+	{{if .BorderThickness}}
+	// Apply the border after contact squeezing so boundaries between groups
+	// are outlined too. Keep the same border contour with and without lighting.
+	if squeezed.z >= -BorderThickness || squeezed.w <= BorderThickness {
+		return vec4(color.rgb*0.35, color.a)
+	}
+	// Light the inset surface from its own edge, not from the outer silhouette.
+	squeezed.z += BorderThickness
+	squeezed.w -= BorderThickness
+	{{end}}
 	factor := edge(squeezed)
 	return vec4(color.rgb*factor, color.a)
 }

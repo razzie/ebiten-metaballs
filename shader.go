@@ -80,6 +80,9 @@ type MetaballShader struct {
 }
 
 func NewMetaballShader(config ShaderConfig) (*MetaballShader, error) {
+	if config.BorderThickness < 0 || math.IsNaN(float64(config.BorderThickness)) || math.IsInf(float64(config.BorderThickness), 0) {
+		return nil, fmt.Errorf("invalid shader config: BorderThickness must be finite and nonnegative: %+v", config)
+	}
 	if config.Groups <= 0 || config.Circles <= 0 || config.Bridges < 0 || config.SmoothK <= 0 {
 		return nil, fmt.Errorf("invalid shader config: %+v", config)
 	}
