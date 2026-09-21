@@ -25,6 +25,9 @@ func New(cfg Config) *State {
 	if cfg.LinearDamping == 0 {
 		cfg.LinearDamping = d.LinearDamping
 	}
+	if cfg.LinearDampingMassFactor < 0 {
+		cfg.LinearDampingMassFactor = 0
+	}
 	if cfg.Workers < 1 {
 		cfg.Workers = 1
 	}

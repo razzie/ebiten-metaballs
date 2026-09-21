@@ -15,7 +15,8 @@ func TestNewConfig(t *testing.T) {
 		GridSpacing: .1, Workers: 3, Substeps: 4,
 		ShellStiffness: 12, ShellDamping: 3, Restitution: .5,
 		CoreCorrection: .7, LinearDamping: .2,
-		AttractionRange: .3, AttractionStrength: 2,
+		LinearDampingMassFactor: .5,
+		AttractionRange:         .3, AttractionStrength: 2,
 	}
 	clamped := zeroDefaults
 	clamped.Workers, clamped.Substeps = 1, 1
@@ -30,6 +31,7 @@ func TestNewConfig(t *testing.T) {
 		{"custom", custom, custom},
 		{"negative counts and restitution", Config{Workers: -2, Substeps: -3, Restitution: -1}, clamped},
 		{"excess restitution", Config{Restitution: 2}, maxRestitution},
+		{"negative mass damping factor", Config{LinearDampingMassFactor: -1}, zeroDefaults},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			s := New(tt.in)

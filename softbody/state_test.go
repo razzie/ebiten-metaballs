@@ -57,7 +57,7 @@ func TestIntegrationUsesRectangularBounds(t *testing.T) {
 		}
 	}
 	zero := make([]float32, count)
-	integrateKernel(&p, zero, zero, zero, zero, zero, zero, 1, 1, .1, b, 1)
+	integrateKernel(&p, zero, zero, zero, zero, zero, zero, 1, 0, 0, .1, b, 1)
 	for i := range count {
 		wantX, wantVX := b.MaxX-p.inner[i], float32(-10)
 		wantY, wantVY := b.MaxY-p.inner[i], float32(-10)

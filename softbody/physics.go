@@ -169,11 +169,12 @@ func (s *State) integrate(dt float32) {
 	if dt <= 0 {
 		return
 	}
-	damping := float32(1)
+	var dampingStep, massDampingStep float32
 	if s.cfg.LinearDamping > 0 {
-		damping = 1 / (1 + s.cfg.LinearDamping*dt)
+		dampingStep = s.cfg.LinearDamping * dt
+		massDampingStep = dampingStep * s.cfg.LinearDampingMassFactor
 	}
-	integrateKernel(&s.p, s.ax, s.ay, s.dvx, s.dvy, s.corrX, s.corrY, dt, damping, s.cfg.Restitution, s.bounds, s.cfg.Workers)
+	integrateKernel(&s.p, s.ax, s.ay, s.dvx, s.dvy, s.corrX, s.corrY, dt, dampingStep, massDampingStep, s.cfg.Restitution, s.bounds, s.cfg.Workers)
 }
 
 func pairScalar(p *particleData, i, j int, cfg Config) (ax, ay, dvx, dvy, cx, cy float32) {

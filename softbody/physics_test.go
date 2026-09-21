@@ -1,9 +1,59 @@
 package softbody
 
 import (
+	"fmt"
 	"math"
 	"testing"
 )
+
+func TestMassDependentDamping(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		rate, factor float32
+	}{
+		{"uniform", 2, 0},
+		{"mass scaled", 2, .5},
+		{"stronger mass scaling", 2, 2},
+		{"disabled", -1, 2},
+	} {
+		for _, substeps := range []int{1, 4} {
+			t.Run(fmt.Sprintf("%s/substeps=%d", tt.name, substeps), func(t *testing.T) {
+				cfg := DefaultConfig()
+				cfg.LinearDamping, cfg.LinearDampingMassFactor = tt.rate, tt.factor
+				cfg.Substeps = substeps
+				s := New(cfg)
+				// Full SIMD vectors and a tail, with unequal masses and grid reordering.
+				const count = 65
+				if err := s.SetBounds(Bounds{MaxX: 2 * (count + 1), MaxY: 2}); err != nil {
+					t.Fatal(err)
+				}
+				masses := [...]float32{.25, 1, 4}
+				for i := range count {
+					_, err := s.AddCircle(CircleSpec{
+						X: float32(2 * (count - i)), Y: 1, VX: .4, VY: -.2,
+						InnerRadius: .1, OuterRadius: .1, Mass: masses[i%len(masses)],
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				const dt = float32(.25)
+				s.Step(dt)
+				for _, c := range s.Snapshot(nil) {
+					mass := masses[(c.ID-1)%uint64(len(masses))]
+					rate := max(tt.rate, 0) * (1 + tt.factor*mass)
+					decay := float32(math.Pow(1/(1+float64(rate*dt/float32(substeps))), float64(substeps)))
+					for axis, got := range [...]float32{c.VX, c.VY} {
+						want := [...]float32{.4 * decay, -.2 * decay}[axis]
+						if math.IsNaN(float64(got)) || math.Abs(float64(got-want)) > 1e-6 {
+							t.Fatalf("circle %d mass %g axis %d: velocity = %g, want %g", c.ID, mass, axis, got, want)
+						}
+					}
+				}
+			})
+		}
+	}
+}
 
 func assertResponse(t *testing.T, got, want [6]float32) {
 	t.Helper()

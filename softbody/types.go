@@ -59,6 +59,12 @@ type Config struct {
 	CoreCorrection float32
 	LinearDamping  float32
 
+	// LinearDampingMassFactor scales the damping rate to
+	// LinearDamping * (1 + LinearDampingMassFactor * mass).
+	// Zero keeps damping independent of mass; positive values damp heavier
+	// circles more. Negative values are clamped to zero.
+	LinearDampingMassFactor float32
+
 	// AttractionRange is the maximum gap between outer shells for same-group
 	// attraction. Strength is the force at contact, fading quadratically with gap.
 	// Both must be positive to enable attraction; zero leaves it disabled.

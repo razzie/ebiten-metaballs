@@ -15,6 +15,17 @@ The outer shells use a nonlinear spring-damper response. The inner cores use
 position correction plus a normal collision impulse, so the simulation does not
 have to rely on an arbitrarily stiff penalty spring to prevent collapse.
 
+`Config.LinearDamping` sets the base velocity damping rate.
+`Config.LinearDampingMassFactor` defaults to zero, giving every circle the same
+damping. Positive values increase the rate with mass:
+`rate = LinearDamping * (1 + LinearDampingMassFactor * mass)`.
+Each substep multiplies velocity by `1 / (1 + rate * dt)`. For example, a factor
+of `1` gives masses `0.25`, `1`, and `4` rates of `1.25`, `2`, and `5` times the
+base rate. To make larger circles damp more, assign larger masses, as the physics
+example does with mass proportional to area. Negative factors are clamped to
+zero. A zero `LinearDamping` selects the default rate; a negative value disables
+all velocity damping, including the mass contribution.
+
 Optional same-group attraction uses `Config.AttractionRange` as the maximum gap
 between outer shells and `Config.AttractionStrength` as the force at contact.
 The force fades quadratically to zero across that gap; shell and core collision

@@ -158,12 +158,16 @@ func pairSpanKernel(p *particleData, i, start, end int, cfg Config) (ax, ay, dvx
 	return
 }
 
-func integrateKernel(p *particleData, ax, ay, dvx, dvy, corrX, corrY []float32, dt, damping, restitution float32, bounds Bounds, workers int) {
+func integrateKernel(p *particleData, ax, ay, dvx, dvy, corrX, corrY []float32, dt, dampingStep, massDampingStep, restitution float32, bounds Bounds, workers int) {
+	damping := 1 / (1 + dampingStep)
 	parallelFor(p.len(), workers, 512, func(start, end int) {
 		var probe simd.Float32s
 		lanes := probe.Len()
 		vdt := simd.BroadcastFloat32s(dt)
 		vdamp := simd.BroadcastFloat32s(damping)
+		vdampDenom := simd.BroadcastFloat32s(1 + dampingStep)
+		vmassDamp := simd.BroadcastFloat32s(massDampingStep)
+		one := simd.BroadcastFloat32s(1)
 		vrest := simd.BroadcastFloat32s(restitution)
 		minX := simd.BroadcastFloat32s(bounds.MinX)
 		minY := simd.BroadcastFloat32s(bounds.MinY)
@@ -173,10 +177,15 @@ func integrateKernel(p *particleData, ax, ay, dvx, dvy, corrX, corrY []float32, 
 
 		i := start
 		for ; i+lanes <= end; i += lanes {
+			particleDamping := vdamp
+			if massDampingStep > 0 {
+				invMass := simd.LoadFloat32s(p.invMass[i : i+lanes])
+				particleDamping = one.Div(vdampDenom.Add(vmassDamp.Div(invMass)))
+			}
 			vx := simd.LoadFloat32s(p.vx[i : i+lanes]).Add(simd.LoadFloat32s(dvx[i : i+lanes]))
 			vy := simd.LoadFloat32s(p.vy[i : i+lanes]).Add(simd.LoadFloat32s(dvy[i : i+lanes]))
-			vx = vx.Add(simd.LoadFloat32s(ax[i : i+lanes]).Mul(vdt)).Mul(vdamp)
-			vy = vy.Add(simd.LoadFloat32s(ay[i : i+lanes]).Mul(vdt)).Mul(vdamp)
+			vx = vx.Add(simd.LoadFloat32s(ax[i : i+lanes]).Mul(vdt)).Mul(particleDamping)
+			vy = vy.Add(simd.LoadFloat32s(ay[i : i+lanes]).Mul(vdt)).Mul(particleDamping)
 
 			x := simd.LoadFloat32s(p.x[i : i+lanes]).Add(simd.LoadFloat32s(corrX[i : i+lanes])).Add(vx.Mul(vdt))
 			y := simd.LoadFloat32s(p.y[i : i+lanes]).Add(simd.LoadFloat32s(corrY[i : i+lanes])).Add(vy.Mul(vdt))
@@ -203,8 +212,12 @@ func integrateKernel(p *particleData, ax, ay, dvx, dvy, corrX, corrY []float32, 
 			vy.Store(p.vy[i : i+lanes])
 		}
 		for ; i < end; i++ {
-			vx := (p.vx[i] + dvx[i] + ax[i]*dt) * damping
-			vy := (p.vy[i] + dvy[i] + ay[i]*dt) * damping
+			particleDamping := damping
+			if massDampingStep > 0 {
+				particleDamping = 1 / (1 + dampingStep + massDampingStep/p.invMass[i])
+			}
+			vx := (p.vx[i] + dvx[i] + ax[i]*dt) * particleDamping
+			vy := (p.vy[i] + dvy[i] + ay[i]*dt) * particleDamping
 			x := p.x[i] + corrX[i] + vx*dt
 			y := p.y[i] + corrY[i] + vy*dt
 			radius := p.inner[i]

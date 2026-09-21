@@ -23,11 +23,16 @@ func pairSpanKernel(p *particleData, i, start, end int, cfg Config) (ax, ay, dvx
 	return
 }
 
-func integrateKernel(p *particleData, ax, ay, dvx, dvy, corrX, corrY []float32, dt, damping, restitution float32, bounds Bounds, workers int) {
+func integrateKernel(p *particleData, ax, ay, dvx, dvy, corrX, corrY []float32, dt, dampingStep, massDampingStep, restitution float32, bounds Bounds, workers int) {
+	damping := 1 / (1 + dampingStep)
 	parallelFor(p.len(), workers, 512, func(start, end int) {
 		for i := start; i < end; i++ {
-			vx := (p.vx[i] + dvx[i] + ax[i]*dt) * damping
-			vy := (p.vy[i] + dvy[i] + ay[i]*dt) * damping
+			particleDamping := damping
+			if massDampingStep > 0 {
+				particleDamping = 1 / (1 + dampingStep + massDampingStep/p.invMass[i])
+			}
+			vx := (p.vx[i] + dvx[i] + ax[i]*dt) * particleDamping
+			vy := (p.vy[i] + dvy[i] + ay[i]*dt) * particleDamping
 			x := p.x[i] + corrX[i] + vx*dt
 			y := p.y[i] + corrY[i] + vy*dt
 

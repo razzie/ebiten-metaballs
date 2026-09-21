@@ -46,6 +46,8 @@ func NewGame() (*Game, error) {
 	// Same colors cohere only within a tiny gap between their outer shells.
 	cfg.AttractionRange = 0.015
 	cfg.AttractionStrength = 0.3
+	cfg.LinearDamping = 0.25
+	cfg.LinearDampingMassFactor = 1 // Larger circles have more mass and drag; 0 gives uniform damping.
 	world := softbody.New(cfg)
 
 	// Scatter separated shells randomly and interleave colors in one shared
