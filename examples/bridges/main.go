@@ -1,292 +1,234 @@
 package main
 
 import (
+	"cmp"
 	"fmt"
+	"image/color"
 	"log"
 	"math"
-	"math/rand"
-	"time"
-
-	metaballs "github.com/razzie/ebiten-metaballs"
+	"math/rand/v2"
+	"slices"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
+	"github.com/hajimehoshi/ebiten/v2/inpututil"
+	metaballs "github.com/razzie/ebiten-metaballs"
+	"github.com/razzie/ebiten-metaballs/softbody"
 )
 
 const (
-	screenWidth  = 900
-	screenHeight = 900
+	screenSize     = 900
+	ticksPerSecond = 60
 
-	numClustersPerGroup  = 3 // per color group; few clusters -> large empty gaps between them
+	numGroups            = 3
+	numClustersPerGroup  = 3
 	minCirclesPerCluster = 3
 	maxCirclesPerCluster = 6
+	minRadius            = 0.01
+	maxRadius            = 0.025
+	bridgeRadius         = minRadius / 4
 
-	baseClusterRadius = 0.15 // cluster occupied-area range is independent of circle count
-	maxClusterRadius  = 0.5
-
-	minRadius = 0.01
-	maxRadius = 0.025
-	minSpeed  = 0.015 // cluster center roaming speed
-	maxSpeed  = 0.05
-
-	minLocalSpeed = 0.02 // circle jitter speed within its cluster's disc
-	maxLocalSpeed = 0.05
-
-	clusterBridgeRadius = minRadius / 4
-
-	smoothK       = 0.015
-	lightDirX     = 1
-	lightDirY     = -1
-	edgeThickness = 0.03
+	cursorRadius    = 0.35
+	cursorImpulse   = 3.0 / ticksPerSecond
+	smoothK         = 0.015
+	edgeThickness   = 0.03
+	borderThickness = 0.004
 )
 
-// clusterCircle is a circle's position/velocity relative to its cluster's center.
-type clusterCircle struct {
-	localX, localY float32
-	velX, velY     float32
-	radius         float32
-}
-
-// cluster is a compact, roaming blob: circles jitter within radius of the
-// moving center but never drift outside it, so bridges between them stay short.
-type cluster struct {
-	centerX, centerY float32
-	velX, velY       float32
-	radius           float32
-	circles          []clusterCircle
-}
-
-// movingGroup pairs a rendered Group with the cluster physics state driving
-// it. group.Circles is the flattened, reused-each-frame position buffer;
-// group.Bridges is precomputed once since cluster membership never changes.
-type movingGroup struct {
-	group         metaballs.Group
-	clusters      []cluster
-	clusterOffset []int // start index of each cluster's circles in group.Circles
+type circleLocation struct {
+	group softbody.Group
+	index int
 }
 
 type Game struct {
-	renderer  *metaballs.Renderer
-	groups    []movingGroup
-	xform     metaballs.UVTransform
-	lastStats *metaballs.Stats
+	world          *softbody.State
+	renderers      [2]*metaballs.Renderer
+	activeRenderer int
+	groups         []metaballs.Group
+	snapshot       []softbody.CircleSnapshot
+	bridges        []softbody.BridgeSnapshot
+	circleIndices  map[uint64]circleLocation
+	xform          metaballs.UVTransform
+	bounds         metaballs.UVBounds
 }
 
-func randRange(min, max float32) float32 {
-	return min + rand.Float32()*(max-min)
-}
-
-// randInDisc returns a point uniformly distributed within a disc of the given radius.
-func randInDisc(radius float32) (x, y float32) {
-	r := radius * float32(math.Sqrt(float64(rand.Float32())))
-	theta := rand.Float32() * 2 * math.Pi
-	return r * float32(math.Cos(float64(theta))), r * float32(math.Sin(float64(theta)))
-}
-
-func randVelocity(minSpeed, maxSpeed float32) (x, y float32) {
-	speed := randRange(minSpeed, maxSpeed)
-	angle := rand.Float32() * 2 * math.Pi
-	return speed * float32(math.Cos(float64(angle))), speed * float32(math.Sin(float64(angle)))
-}
-
-func newMovingGroup(color ebiten.ColorScale, numClusters int) movingGroup {
-	mg := movingGroup{
-		clusters:      make([]cluster, numClusters),
-		clusterOffset: make([]int, numClusters),
-	}
-	mg.group.Color = color
-
-	for ci := range mg.clusters {
-		// Cube the random sample so most clusters occupy a small area and a few are large;
-		// radius is independent of circle count so fewer/larger circles don't shrink the area.
-		radius := baseClusterRadius + float32(math.Pow(rand.Float64(), 3))*(maxClusterRadius-baseClusterRadius)
-		count := minCirclesPerCluster + rand.Intn(maxCirclesPerCluster-minCirclesPerCluster+1)
-
-		velX, velY := randVelocity(minSpeed, maxSpeed)
-		c := cluster{
-			centerX: randRange(radius, 1-radius),
-			centerY: randRange(radius, 1-radius),
-			velX:    velX,
-			velY:    velY,
-			radius:  radius,
-			circles: make([]clusterCircle, count),
-		}
-
-		for i := range c.circles {
-			localX, localY := randInDisc(radius)
-			localVelX, localVelY := randVelocity(minLocalSpeed, maxLocalSpeed)
-
-			c.circles[i] = clusterCircle{
-				localX: localX,
-				localY: localY,
-				velX:   localVelX,
-				velY:   localVelY,
-				radius: randRange(minRadius, maxRadius),
+// Seed nine separated chains. The physics bridges keep each chain together,
+// while every circle remains free to collide and respond to the cursor.
+func populateWorld(world *softbody.State) error {
+	for group := range numGroups {
+		for cluster := range numClustersPerGroup {
+			cx := (float32(cluster) + 0.5) / numClustersPerGroup
+			cy := (float32(group) + 0.5) / numGroups
+			count := minCirclesPerCluster + rand.IntN(maxCirclesPerCluster-minCirclesPerCluster+1)
+			radius := 0.07 + rand.Float32()*0.04
+			phase := rand.Float64() * 2 * math.Pi
+			var previous uint64
+			for i := range count {
+				angle := phase + float64(i)*2*math.Pi/float64(count)
+				outer := minRadius + rand.Float32()*(maxRadius-minRadius)
+				size := outer / 0.02
+				id, err := world.AddCircle(softbody.CircleSpec{
+					X:           cx + radius*float32(math.Cos(angle)),
+					Y:           cy + radius*float32(math.Sin(angle)),
+					VX:          (rand.Float32() - 0.5) * 0.06,
+					VY:          (rand.Float32() - 0.5) * 0.06,
+					InnerRadius: outer * 0.75,
+					OuterRadius: outer,
+					Mass:        size * size,
+					Group:       softbody.Group(group),
+				})
+				if err != nil {
+					return fmt.Errorf("add circle: %w", err)
+				}
+				if previous != 0 {
+					// Leave some slack around the starting separation. Zero
+					// BreakDistance keeps chains connected during interaction.
+					distance := 2 * radius * float32(math.Sin(math.Pi/float64(count)))
+					_, err := world.AddBridge(softbody.BridgeSpec{
+						A: previous, B: id,
+						MinDistance:  distance * 0.8,
+						MaxDistance:  distance * 1.2,
+						AttractForce: 0.6,
+						RepelForce:   0.6,
+					})
+					if err != nil {
+						return fmt.Errorf("add bridge: %w", err)
+					}
+				}
+				previous = id
 			}
 		}
-
-		mg.clusterOffset[ci] = len(mg.group.Circles)
-		for _, cc := range c.circles {
-			mg.group.Circles = append(mg.group.Circles, metaballs.Circle{
-				X:      c.centerX + cc.localX,
-				Y:      c.centerY + cc.localY,
-				Radius: cc.radius,
-			})
-		}
-		for i := 0; i < len(c.circles)-1; i++ {
-			mg.group.Bridges = append(mg.group.Bridges, metaballs.Bridge{
-				A:            mg.clusterOffset[ci] + i,
-				B:            mg.clusterOffset[ci] + i + 1,
-				MiddleRadius: clusterBridgeRadius,
-			})
-		}
-
-		mg.clusters[ci] = c
 	}
-
-	return mg
+	return nil
 }
 
 func NewGame() (*Game, error) {
-	groups := []movingGroup{
-		newMovingGroup(metaballs.NewColorScale(1, 0.2, 0.2, 1), numClustersPerGroup),
-		newMovingGroup(metaballs.NewColorScale(0.2, 0.4, 1, 1), numClustersPerGroup),
-		newMovingGroup(metaballs.NewColorScale(0.2, 1, 0.4, 1), numClustersPerGroup),
-	}
-
-	// Capacity tiers: shader pool from small (cheap, common case for sparse
-	// tiles) up to large (rare, dense tiles after subdivision). Bridge
-	// capacities scale with circle capacities since each cluster chain has
-	// one bridge fewer than its circle count.
-	tiers := []metaballs.ShaderCapacity{
-		{Groups: 3, Circles: 32, Bridges: 16},
-		{Groups: 3, Circles: 64, Bridges: 32},
-	}
-
-	renderer, err := metaballs.NewRenderer(metaballs.RendererConfig{
-		Common:      metaballs.ShaderCommonConfig{SmoothK: smoothK, LightDirX: lightDirX, LightDirY: lightDirY, EdgeThickness: edgeThickness},
-		Tiers:       tiers,
-		RootCols:    1,
-		RootRows:    1,
-		MaxDepth:    3,
-		MinTileSize: 0.01,
-		Debug:       true,
-		Workers:     4,
-	})
-	if err != nil {
+	cfg := softbody.DefaultConfig()
+	cfg.Workers = 4
+	cfg.Substeps = 4
+	world := softbody.New(cfg)
+	if err := populateWorld(world); err != nil {
 		return nil, err
 	}
 
-	xform, _ := metaballs.NewCenteredUVTransform(screenWidth, screenHeight)
+	xform, bounds := metaballs.NewCenteredUVTransform(screenSize, screenSize)
+	g := &Game{
+		world:         world,
+		xform:         xform,
+		bounds:        bounds,
+		circleIndices: make(map[uint64]circleLocation, world.Len()),
+		groups: []metaballs.Group{
+			{Color: metaballs.NewColorScale(1, 0.2, 0.2, 1)},
+			{Color: metaballs.NewColorScale(0.2, 0.4, 1, 1)},
+			{Color: metaballs.NewColorScale(0.2, 1, 0.4, 1)},
+		},
+	}
+	g.syncGeometry()
+	for i, common := range [...]metaballs.ShaderCommonConfig{
+		{SmoothK: smoothK, LightDirX: 1, LightDirY: -1, EdgeThickness: edgeThickness, FxaaEnabled: true},
+		{SmoothK: smoothK, BorderThickness: borderThickness, FxaaEnabled: true},
+	} {
+		renderer, err := metaballs.NewRenderer(metaballs.RendererConfig{
+			Common: common,
+			Tiers: []metaballs.ShaderCapacity{
+				{Groups: numGroups, Circles: 16, Bridges: 16},
+				// Fit every circle and bridge even when the cursor gathers
+				// the entire world into a single tile.
+				metaballs.CapacityForGroups(g.groups),
+			},
+			RootCols: 1, RootRows: 1,
+			MaxDepth: 3, MinTileSize: 0.01,
+			Workers: 4,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("create renderer %d: %w", i, err)
+		}
+		g.renderers[i] = renderer
+	}
+	return g, nil
+}
 
-	return &Game{
-		renderer:  renderer,
-		groups:    groups,
-		xform:     xform,
-		lastStats: new(metaballs.Stats),
-	}, nil
+func (g *Game) syncGeometry() {
+	g.snapshot = g.world.Snapshot(g.snapshot)
+	g.bridges = g.world.BridgeSnapshot(g.bridges)
+	// Physics sorts by grid cell. Keep blending order stable and resolve
+	// bridge IDs to the current group-local rendering indices.
+	slices.SortFunc(g.snapshot, func(a, b softbody.CircleSnapshot) int {
+		return cmp.Compare(a.ID, b.ID)
+	})
+	clear(g.circleIndices)
+	for i := range g.groups {
+		g.groups[i].Circles = g.groups[i].Circles[:0]
+		g.groups[i].Bridges = g.groups[i].Bridges[:0]
+	}
+	for _, c := range g.snapshot {
+		group := &g.groups[c.Group]
+		g.circleIndices[c.ID] = circleLocation{group: c.Group, index: len(group.Circles)}
+		group.Circles = append(group.Circles, metaballs.Circle{X: c.X, Y: c.Y, Radius: c.OuterRadius})
+	}
+	for _, b := range g.bridges {
+		a, z := g.circleIndices[b.A], g.circleIndices[b.B]
+		// populateWorld only connects circles of the same color.
+		group := &g.groups[a.group]
+		group.Bridges = append(group.Bridges, metaballs.Bridge{A: a.index, B: z.index, MiddleRadius: bridgeRadius})
+	}
 }
 
 func (g *Game) Update() error {
-	const dt = 1.0 / 60.0
-
-	for gi := range g.groups {
-		mg := &g.groups[gi]
-
-		for ci := range mg.clusters {
-			c := &mg.clusters[ci]
-
-			c.centerX += c.velX * dt
-			c.centerY += c.velY * dt
-
-			effRadius := c.radius + maxRadius
-			if c.centerX-effRadius < 0 {
-				c.centerX = effRadius
-				c.velX = -c.velX
-			} else if c.centerX+effRadius > 1 {
-				c.centerX = 1 - effRadius
-				c.velX = -c.velX
-			}
-
-			if c.centerY-effRadius < 0 {
-				c.centerY = effRadius
-				c.velY = -c.velY
-			} else if c.centerY+effRadius > 1 {
-				c.centerY = 1 - effRadius
-				c.velY = -c.velY
-			}
-
-			for i := range c.circles {
-				cc := &c.circles[i]
-
-				cc.localX += cc.velX * dt
-				cc.localY += cc.velY * dt
-
-				// Circular container bounce: clamp to the disc edge and
-				// reflect the radial velocity component so circles never
-				// drift outside their cluster.
-				if distSq := cc.localX*cc.localX + cc.localY*cc.localY; distSq > c.radius*c.radius {
-					dist := float32(math.Sqrt(float64(distSq)))
-					nx, ny := cc.localX/dist, cc.localY/dist
-
-					cc.localX, cc.localY = nx*c.radius, ny*c.radius
-
-					vDotN := cc.velX*nx + cc.velY*ny
-					cc.velX -= 2 * vDotN * nx
-					cc.velY -= 2 * vDotN * ny
-				}
-
-				offset := mg.clusterOffset[ci] + i
-				mg.group.Circles[offset].X = c.centerX + cc.localX
-				mg.group.Circles[offset].Y = c.centerY + cc.localY
-			}
+	if inpututil.IsKeyJustPressed(ebiten.KeySpace) {
+		g.activeRenderer = (g.activeRenderer + 1) % len(g.renderers)
+	}
+	mx, my := ebiten.CursorPosition()
+	x, y := g.xform.ScreenToUV(mx, my)
+	if x >= g.bounds.MinX && x < g.bounds.MaxX && y >= g.bounds.MinY && y < g.bounds.MaxY {
+		var strength float32
+		if ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft) {
+			strength -= cursorImpulse
+		}
+		if ebiten.IsMouseButtonPressed(ebiten.MouseButtonRight) {
+			strength += cursorImpulse
+		}
+		if strength != 0 {
+			g.world.QueueRadialImpulse(softbody.RadialImpulse{
+				X: x, Y: y, Radius: cursorRadius, Strength: strength,
+			})
 		}
 	}
-
+	g.world.Step(1.0 / ticksPerSecond)
+	g.syncGeometry()
 	return nil
 }
 
 func (g *Game) Draw(screen *ebiten.Image) {
-	groups := make([]metaballs.Group, len(g.groups))
-	for i, mg := range g.groups {
-		groups[i] = mg.group
-	}
-
-	stats, err := g.renderer.Draw(screen, groups, g.xform)
+	screen.Fill(color.RGBA{R: 16, G: 18, B: 24, A: 255})
+	stats, err := g.renderers[g.activeRenderer].Draw(screen, g.groups, g.xform)
 	if err != nil {
-		panic(err)
+		ebitenutil.DebugPrint(screen, err.Error())
+		return
 	}
-	g.lastStats = stats
-
-	totalCircles := 0
-	for _, mg := range g.groups {
-		totalCircles += len(mg.group.Circles)
+	mode := "normal lighting"
+	if g.activeRenderer == 1 {
+		mode = "border thickness"
 	}
-
 	ebitenutil.DebugPrint(screen, fmt.Sprintf(
-		"FPS: %0.1f  TPS: %0.1f\ncircles: %d\ntiles drawn: %d  skipped: %d\ncircles clipped: %d",
-		ebiten.ActualFPS(), ebiten.ActualTPS(),
-		totalCircles,
-		g.lastStats.TilesDrawn.Load(), g.lastStats.TilesSkipped.Load(),
-		g.lastStats.CirclesClipped.Load(),
+		"Hold left click: attract nearby circles | Hold right click: repel\nSpace: switch renderer | Current: %s\n%d circles | %d bridges | FPS: %.1f | TPS: %.1f\nTiles: %d | Skipped: %d | Circles clipped: %d",
+		mode, g.world.Len(), len(g.bridges), ebiten.ActualFPS(), ebiten.ActualTPS(),
+		stats.TilesDrawn.Load(), stats.TilesSkipped.Load(), stats.CirclesClipped.Load(),
 	))
 }
 
 func (g *Game) Layout(outsideWidth, outsideHeight int) (int, int) {
-	return screenWidth, screenHeight
+	return screenSize, screenSize
 }
 
 func main() {
-	rand.Seed(time.Now().UnixNano())
-
 	game, err := NewGame()
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	ebiten.SetWindowSize(screenWidth, screenHeight)
-	ebiten.SetWindowTitle("Metaballs - Bridges")
-
+	ebiten.SetWindowSize(screenSize, screenSize)
+	ebiten.SetWindowTitle("Metaballs - Softbody Bridges")
+	ebiten.SetTPS(ticksPerSecond)
 	if err := ebiten.RunGame(game); err != nil {
 		log.Fatal(err)
 	}
