@@ -16,9 +16,8 @@ import (
 const (
 	screenSize      = 900
 	ticksPerSecond  = 60
-	circlesPerGroup = 48
-	spawnColumns    = 12
-	baseRadius      = 0.025
+	circlesPerGroup = 36
+	baseRadius      = 0.02
 	cursorRadius    = 0.5
 	cursorImpulse   = 1.5 / ticksPerSecond
 )
@@ -47,25 +46,48 @@ func NewGame() (*Game, error) {
 	cfg.AttractionStrength = 0.3
 	world := softbody.New(cfg)
 
-	// Start with separated shells and interleave colors in one shared world,
-	// so all colors collide with each other through the same hex grid.
+	// Scatter separated shells randomly and interleave colors in one shared
+	// world, so all colors collide with each other through the same hex grid.
 	const count = 3 * circlesPerGroup
-	const rows = (count + spawnColumns - 1) / spawnColumns
+	spawned := make([]metaballs.Circle, 0, count)
 	for i := range count {
 		size := 0.5 + rand.Float32()
 		outer := baseRadius * size
+		var x, y float32
+		placed := false
+		for range 1000 {
+			x = outer + rand.Float32()*(1-2*outer)
+			y = outer + rand.Float32()*(1-2*outer)
+			placed = true
+			for _, other := range spawned {
+				dx, dy := x-other.X, y-other.Y
+				separation := outer + other.Radius
+				if dx*dx+dy*dy < separation*separation {
+					placed = false
+					break
+				}
+			}
+			if placed {
+				break
+			}
+		}
+		if !placed {
+			return nil, fmt.Errorf("place circle %d: no non-overlapping position found", i)
+		}
+		spawned = append(spawned, metaballs.Circle{X: x, Y: y, Radius: outer})
 		angle := rand.Float64() * 2 * math.Pi
 		speed := 0.025 + rand.Float32()*0.025
 		_, err := world.AddCircle(softbody.CircleSpec{
-			X:           (float32(i%spawnColumns) + 0.5) / spawnColumns,
-			Y:           (float32(i/spawnColumns) + 0.5) / rows,
-			VX:          speed * float32(math.Cos(angle)),
-			VY:          speed * float32(math.Sin(angle)),
-			InnerRadius: outer * 0.6,
+			X:  x,
+			Y:  y,
+			VX: speed * float32(math.Cos(angle)),
+			VY: speed * float32(math.Sin(angle)),
+			// The solid collision core and rendered circle share the same radius.
+			InnerRadius: outer,
 			OuterRadius: outer,
 			// Constant density: mass scales with area, with unit mass at baseRadius.
 			Mass:  size * size,
-			Group: softbody.Group((i + i/spawnColumns) % 3),
+			Group: softbody.Group(i % 3),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("add circle %d: %w", i, err)
@@ -74,7 +96,8 @@ func NewGame() (*Game, error) {
 
 	renderer, err := metaballs.NewRenderer(metaballs.RendererConfig{
 		Common: metaballs.ShaderCommonConfig{
-			SmoothK:       0.06,
+			// Keep contact rounding small relative to the physical circle radius.
+			SmoothK:       baseRadius * 3,
 			LightDirX:     1,
 			LightDirY:     -1,
 			EdgeThickness: 0.008,
