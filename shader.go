@@ -25,9 +25,8 @@ var kageTemplates = template.Must(template.New("").Funcs(template.FuncMap{
 }).ParseFS(kageFS, "*.kage.tmpl"))
 
 const (
-	basicShaderTemplate = "shader_basic.kage.tmpl"
-	edgeShaderTemplate  = "shader_edge.kage.tmpl"
-	fxaaShaderTemplate  = "fxaa.kage.tmpl"
+	mainShaderTemplate = "shader_main.kage.tmpl"
+	fxaaShaderTemplate = "fxaa.kage.tmpl"
 )
 
 // formatKageFloat renders f as a Kage float literal, which requires a decimal point.
@@ -85,11 +84,9 @@ func NewMetaballShader(config ShaderConfig) (*MetaballShader, error) {
 		return nil, fmt.Errorf("invalid shader config: %+v", config)
 	}
 
-	edgeShadingEnabled := false
 	data := config
 
 	if length := math.Hypot(float64(config.LightDirX), float64(config.LightDirY)); length > 0 {
-		edgeShadingEnabled = true
 		data.LightDirX = float32(float64(config.LightDirX) / length)
 		data.LightDirY = float32(float64(config.LightDirY) / length)
 
@@ -98,13 +95,8 @@ func NewMetaballShader(config ShaderConfig) (*MetaballShader, error) {
 		}
 	}
 
-	templateName := basicShaderTemplate
-	if edgeShadingEnabled {
-		templateName = edgeShaderTemplate
-	}
-
 	var src bytes.Buffer
-	if err := kageTemplates.ExecuteTemplate(&src, templateName, data); err != nil {
+	if err := kageTemplates.ExecuteTemplate(&src, mainShaderTemplate, data); err != nil {
 		return nil, fmt.Errorf("generate metaball shader source: %w", err)
 	}
 

@@ -7,9 +7,9 @@ import (
 	"testing"
 )
 
-// TestNewMetaballShaderCompilesTemplates is a smoke test that both Kage
-// templates (basic and edge variants) generate valid, compilable shader
-// source. ebiten.NewShader only parses/type-checks Kage and needs no GPU or
+// TestNewMetaballShaderCompilesTemplates is a smoke test that the main Kage
+// template generates valid, compilable basic and edge shader variants.
+// ebiten.NewShader only parses/type-checks Kage and needs no GPU or
 // display, so this runs headless and catches template breakage that
 // `go build` cannot see (e.g. uniform renames).
 func TestNewMetaballShaderCompilesTemplates(t *testing.T) {

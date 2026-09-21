@@ -1,29 +1,5 @@
-//kage:unit pixels
+{{define "edge.fields"}}
 
-package main
-
-const SmoothK = {{float .SmoothK}}
-const MaxGroups = {{.Groups}}
-const MaxCircles = {{.Circles}}
-{{if gt .Bridges 0}}const MaxBridges = {{.Bridges}}{{end}}
-const EdgeThickness = {{float .EdgeThickness}}
-
-var UvScale vec2
-var UvOffset vec2
-var PixelOrigin vec2
-var GroupCount int
-var GroupColors [MaxGroups]vec4
-var CircleCount int
-// xy = center, z = radius, w = group ID
-var Circles [MaxCircles]vec4
-{{if gt .Bridges 0}}
-var BridgeCount int
-var BridgeEnds [MaxBridges]vec4
-// xyz = endpoint/middle radii, w = group ID
-var BridgeRadii [MaxBridges]vec4
-{{end}}
-
-// xy = distance gradient, z = distance, w = blended radius for lighting.
 func sminField(a, b vec4, k float) vec4 {
 	if a.w == 0.0 {
 		return b
@@ -42,16 +18,9 @@ func sdCircleField(p vec2, circle vec4) vec4 {
 }
 
 {{if gt .Bridges 0}}
-func sdSplineCapsuleField(
-	p vec2,
-	a vec2,
-	b vec2,
-	r1 float,
-	r2 float,
-	r3 float,
-) vec4 {
-	ba := b - a
-	pa := p - a
+func sdSplineCapsuleField(p vec2, ends, radii vec4) vec4 {
+	ba := ends.zw - ends.xy
+	pa := p - ends.xy
 
 	ba2 := max(dot(ba, ba), 1e-12)
 	invBa2 := 1.0 / ba2
@@ -63,8 +32,8 @@ func sdSplineCapsuleField(
 	side := step(0.5, t)
 	x := 2.0*t - side
 
-	ra := mix(r1, r2, side)
-	rb := mix(r2, r3, side)
+	ra := mix(radii.x, radii.y, side)
+	rb := mix(radii.y, radii.z, side)
 	dr := rb - ra
 
 	// smoothstep interpolation.
@@ -83,32 +52,35 @@ func sdSplineCapsuleField(
 
 	return vec4(grad, rawDist-radius, radius)
 }
-
 {{end}}
 
 // Subtract a smooth minimum of the nearest competing GROUP distance and zero.
 // Competitors are never smooth-unioned together, so extra colors do not inflate
 // the opposing field. The transition rounds the exposed ends of a contact.
-func squeezeField(main, other vec3, k float) vec3 {
+func squeezeField(main, other vec4, k float) vec4 {
 	h := clamp(0.5-0.5*other.z/k, 0.0, 1.0)
-	return vec3(main.xy-h*other.xy, main.z-other.z*h+k*h*(1.0-h))
+	return vec4(main.xy-h*other.xy, main.z-other.z*h+k*h*(1.0-h), main.w)
 }
 
-func edge(dist float, grad vec2, radius float) float {
+{{/* End of edge.fields */}}
+{{end}}
+
+{{define "edge.lighting"}}
+func edge(field vec4) float {
 	lightDir := {{vec2 .LightDirX .LightDirY}}
 
-	thickness := min(EdgeThickness, max(radius, 1e-4))
+	thickness := min(EdgeThickness, max(field.w, 1e-4))
 
-	grad2 := dot(grad, grad)
+	grad2 := dot(field.xy, field.xy)
 	gradLen := sqrt(grad2)
 
 	// Polynomial smin isn't a true SDF in the blend region.
-	dist /= max(gradLen, 0.25)
+	dist := field.z / max(gradLen, 0.25)
 
 	u := clamp(dist/-thickness, 0.0, 1.0)
 	edgeAmount := 1.0 - u*(2.0-u)
 
-	normal := grad * inversesqrt(max(grad2, 1e-12))
+	normal := field.xy * inversesqrt(max(grad2, 1e-12))
 
 	// At the medial axis, opposing primitive gradients cancel.
 	// Directional lighting there has no meaningful normal.
@@ -118,75 +90,4 @@ func edge(dist float, grad vec2, radius float) float {
 
 	return mix(0.75, 1.0, edgeAmount*lighting)
 }
-
-func Fragment(dstPos vec4) vec4 {
-	uv := (dstPos.xy-imageDstOrigin()+PixelOrigin)*UvScale + UvOffset
-	var fields [MaxGroups]vec4
-
-	// Evaluate every primitive once, accumulating into its own group's smooth distance field.
-	// Do not cut off individual distances at SmoothK: positive intermediate
-	// blends can carry their influence into the final contour.
-	for i := 0; i < MaxCircles; i++ {
-		if i >= CircleCount {
-			break
-		}
-		circle := Circles[i]
-		if circle.z <= 0.0 {
-			continue
-		}
-		field := sdCircleField(uv, circle)
-		g := int(circle.w)
-		fields[g] = sminField(fields[g], field, SmoothK)
-	}
-	{{if gt .Bridges 0}}
-	for i := 0; i < MaxBridges; i++ {
-		if i >= BridgeCount {
-			break
-		}
-		ends := BridgeEnds[i]
-		radii := BridgeRadii[i]
-		field := sdSplineCapsuleField(uv, ends.xy, ends.zw, radii.x, radii.y, radii.z)
-		if field.w <= 0.0 {
-			continue
-		}
-		g := int(radii.w)
-		fields[g] = sminField(fields[g], field, SmoothK)
-	}
-	{{end}}
-
-	// Only the lowest group distance can survive squeezing. Track the two
-	// lowest fields in one scan instead of comparing every pair of groups.
-	selected := -1
-	main := vec4(0.0)
-	other := main
-	for g := 0; g < MaxGroups; g++ {
-		if g >= GroupCount {
-			break
-		}
-		field := fields[g]
-		if field.w == 0.0 {
-			continue
-		}
-		if main.w == 0.0 || field.z < main.z {
-			other = main
-			main = field
-			selected = g
-		} else if other.w == 0.0 || field.z < other.z {
-			other = field
-		}
-	}
-	if selected < 0 || main.z >= 0.0 {
-		discard()
-		return vec4(0.0)
-	}
-	squeezed := main.xyz
-	if other.w > 0.0 {
-		squeezed = squeezeField(main.xyz, other.xyz, SmoothK/2.0)
-	}
-	if squeezed.z >= 0.0 {
-		discard()
-	}
-	color := GroupColors[selected]
-	factor := edge(squeezed.z, squeezed.xy, main.w)
-	return vec4(color.rgb*factor, color.a)
-}
+{{end}}

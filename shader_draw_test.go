@@ -456,10 +456,10 @@ func checkOverlapFieldGradients(t *testing.T) {
 	t.Helper()
 	cfg := ShaderConfig{ShaderCapacity: ShaderCapacity{Groups: 1, Circles: 1}, ShaderCommonConfig: ShaderCommonConfig{SmoothK: 1, LightDirX: 1, EdgeThickness: 0.1}}
 	var basic, edge bytes.Buffer
-	if err := kageTemplates.ExecuteTemplate(&basic, basicShaderTemplate, cfg); err != nil {
+	if err := kageTemplates.ExecuteTemplate(&basic, "basic.fields", cfg); err != nil {
 		t.Fatal(err)
 	}
-	if err := kageTemplates.ExecuteTemplate(&edge, edgeShaderTemplate, cfg); err != nil {
+	if err := kageTemplates.ExecuteTemplate(&edge, "edge.fields", cfg); err != nil {
 		t.Fatal(err)
 	}
 	helper := func(src string) string {
@@ -471,7 +471,7 @@ func checkOverlapFieldGradients(t *testing.T) {
 	}
 	src := "//kage:unit pixels\npackage main\n" + strings.ReplaceAll(helper(basic.String()), "sminField", "basicSminField") + helper(edge.String()) + `
 func sample(a, b float) vec2 {
- return basicSminField(vec2(a, 3.0+0.1*a), vec2(b, 4.0+0.2*b), 1.0)
+ return basicSminField(vec4(0.0, 0.0, a, 3.0+0.1*a), vec4(0.0, 0.0, b, 4.0+0.2*b), 1.0).zw
 }
 func Fragment(pos vec4) vec4 {
  p := (pos.xy-imageDstOrigin())/32.0 - 2.0
@@ -540,6 +540,8 @@ func (*ownershipTestGame) Draw(*ebiten.Image)         {}
 func (g *ownershipTestGame) Update() error {
 	for _, edge := range []bool{false, true} {
 		g.t.Run(fmt.Sprintf("edge=%t", edge), func(t *testing.T) {
+			t.Run("inactive group fields", func(t *testing.T) { checkInactiveGroupFields(t, edge) })
+			t.Run("tied competitors", func(t *testing.T) { checkTiedCompetitors(t, edge) })
 			t.Run("duplicate competitors", func(t *testing.T) { checkOwnershipDuplicates(t, edge) })
 			t.Run("disjoint groups", func(t *testing.T) { checkOwnershipPartition(t, edge) })
 			t.Run("separate competing groups", func(t *testing.T) { checkSeparateGroupFields(t, edge) })
@@ -549,6 +551,95 @@ func (g *ownershipTestGame) Update() error {
 		})
 	}
 	return ebiten.Termination
+}
+
+// Single-group specialization and neutral competitors must agree, including
+// groups whose primitives produce no field at some or all pixels.
+func checkInactiveGroupFields(t *testing.T, edge bool) {
+	t.Helper()
+	inactive := Group{Circles: []Circle{{X: 32, Y: 32}, {X: 32, Y: 32, Radius: -8}}, Color: NewColorScale(0, 1, 0, 1)}
+	scenes := map[string]Group{
+		"circle":          {Circles: []Circle{{X: 32, Y: 32, Radius: 16}}},
+		"zero radius":     {Circles: []Circle{{X: 32, Y: 32}}},
+		"negative radius": inactive,
+		"bridge with zero endpoints": {
+			Circles: []Circle{{X: 8, Y: 32}, {X: 56, Y: 32}},
+			Bridges: []Bridge{{A: 0, B: 1, MiddleRadius: 12}},
+		},
+		"bridge with negative middle": {
+			Circles: []Circle{{X: 8, Y: 32, Radius: 8}, {X: 56, Y: 32, Radius: 8}},
+			Bridges: []Bridge{{A: 0, B: 1, MiddleRadius: -8}},
+		},
+	}
+	var xf UVTransform
+	xf.SetScale(1, 1)
+	for name, scene := range scenes {
+		t.Run(name, func(t *testing.T) {
+			scene.Color = NewColorScale(1, 0, 0, 1)
+			var want []byte
+			for variant := range 3 {
+				cfg := ShaderConfig{ShaderCapacity: ShaderCapacity{Groups: 1, Circles: 6, Bridges: 1}, ShaderCommonConfig: ShaderCommonConfig{SmoothK: 12}}
+				groups := []Group{scene}
+				if variant > 0 {
+					cfg.Groups = 3
+				}
+				if variant == 2 {
+					groups = []Group{inactive, scene, inactive}
+				}
+				if edge {
+					cfg.LightDirX, cfg.LightDirY, cfg.EdgeThickness = 1, -1, 4
+				}
+				shader, err := NewMetaballShader(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer shader.shader.Deallocate()
+				dst := ebiten.NewImage(64, 64)
+				defer dst.Deallocate()
+				if err := shader.Draw(dst, groups, xf); err != nil {
+					t.Fatal(err)
+				}
+				pixels := make([]byte, 64*64*4)
+				dst.ReadPixels(pixels)
+				if variant == 0 {
+					want = pixels
+				} else if !bytes.Equal(pixels, want) {
+					t.Fatalf("variant %d differs from the single-group shader", variant)
+				}
+			}
+		})
+	}
+}
+
+// Equal-distance runners-up have different gradients. Keep the earlier one's
+// lighting regardless of when the winning group enters the selection scan.
+func checkTiedCompetitors(t *testing.T, edge bool) {
+	t.Helper()
+	main := Group{Circles: []Circle{{X: 128.5, Y: 128.5, Radius: 12}}, Color: NewColorScale(1, 0, 0, 1)}
+	left := Group{Circles: []Circle{{X: 112.5, Y: 128.5, Radius: 26}}, Color: NewColorScale(0, 1, 0, 1)}
+	right := Group{Circles: []Circle{{X: 144.5, Y: 128.5, Radius: 26}}, Color: NewColorScale(0, 0, 1, 1)}
+	const center = 4 * (128*256 + 128)
+	for _, competitors := range [][2]Group{{left, right}, {right, left}} {
+		want := renderOwnershipPixels(t, []Group{main, competitors[0]}, edge, 8, -1)
+		if want[center] == 0 || want[center+3] != 255 {
+			t.Fatal("test scene has no visible winner at the tied pixel")
+		}
+		for winner := range 3 {
+			groups := append([]Group(nil), competitors[:winner]...)
+			groups = append(groups, main)
+			groups = append(groups, competitors[winner:]...)
+			got := renderOwnershipPixels(t, groups, edge, 8, -1)
+			if !bytes.Equal(got[center:center+4], want[center:center+4]) {
+				t.Fatalf("winner at index %d: tied pixel = %v, want %v", winner, got[center:center+4], want[center:center+4])
+			}
+		}
+	}
+	pixels := renderOwnershipPixels(t, []Group{main, main}, edge, 8, -1)
+	for i := 3; i < len(pixels); i += 4 {
+		if pixels[i] != 0 {
+			t.Fatalf("coincident tied winners left a visible pixel at (%d,%d)", i/4%256, i/4/256)
+		}
+	}
 }
 
 func checkContactDepth(t *testing.T, edge bool) {
@@ -782,14 +873,14 @@ func (g *squeezeGradientGame) Update() error {
 
 	const squeezeSample = `
 func sample(p vec2, k float) vec3 {
- main := vec3(0.3,-0.2,0.3*p.x-0.2*p.y-0.15)
- other := vec3(-0.4,0.6,-0.4*p.x+0.6*p.y)
- return squeezeField(main,other,k)
+ main := vec4(0.3,-0.2,0.3*p.x-0.2*p.y-0.15,0.5)
+ other := vec4(-0.4,0.6,-0.4*p.x+0.6*p.y,0.4)
+ return squeezeField(main,other,k).xyz
 }
 `
 	const bridgeSample = `
 func sample(p vec2, k float) vec3 {
- return sdSplineCapsuleField(p,vec2(-1.0,0.0),vec2(1.0,0.0),0.2,0.5,0.3).xyz
+ return sdSplineCapsuleField(p,vec4(-1.0,0.0,1.0,0.0),vec4(0.2,0.5,0.3,0.0)).xyz
 }
 `
 	const groupSample = `
@@ -801,9 +892,9 @@ func sample(p vec2, k float) vec3 {
 `
 	const bridgeContactSample = `
 func sample(p vec2, k float) vec3 {
- field := sdSplineCapsuleField(p,vec2(-1.0,0.0),vec2(1.0,0.0),0.2,0.5,0.3)
+ field := sdSplineCapsuleField(p,vec4(-1.0,0.0,1.0,0.0),vec4(0.2,0.5,0.3,0.0))
  other := sdCircleField(p,vec4(0.3,0.4,0.5,0.0))
- return squeezeField(field.xyz,other.xyz,k)
+ return squeezeField(field,other,k).xyz
 }
 `
 	for _, test := range []struct {
@@ -845,7 +936,7 @@ func checkSqueezeShaderGradient(t *testing.T, sample, position string, k float32
 		ShaderCommonConfig: ShaderCommonConfig{SmoothK: 1, LightDirX: 1, EdgeThickness: 0.1},
 	}
 	var rendered bytes.Buffer
-	if err := kageTemplates.ExecuteTemplate(&rendered, edgeShaderTemplate, cfg); err != nil {
+	if err := kageTemplates.ExecuteTemplate(&rendered, mainShaderTemplate, cfg); err != nil {
 		t.Fatal(err)
 	}
 	template := rendered.String()
