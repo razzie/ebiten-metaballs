@@ -1,11 +1,13 @@
 package main
 
 import (
+	"cmp"
 	"fmt"
 	"image/color"
 	"log"
 	"math"
 	"math/rand/v2"
+	"slices"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
@@ -139,10 +141,14 @@ func NewGame() (*Game, error) {
 
 func (g *Game) syncCircles() {
 	g.snapshot = g.world.Snapshot(g.snapshot)
+	// Grid rebuilds reorder snapshots. Smooth-min blending is not associative,
+	// so preserve each circle's place in the blend as it moves between cells.
+	slices.SortFunc(g.snapshot, func(a, b softbody.CircleSnapshot) int {
+		return cmp.Compare(a.ID, b.ID)
+	})
 	for i := range g.groups {
 		g.groups[i].Circles = g.groups[i].Circles[:0]
 	}
-	// Snapshots follow the grid's current ordering, not insertion order.
 	for _, c := range g.snapshot {
 		group := &g.groups[c.Group]
 		group.Circles = append(group.Circles, metaballs.Circle{

@@ -52,6 +52,9 @@ type Bridge struct {
 	MiddleRadius float32
 }
 
+// Group blends its circles, then bridges, in slice order. Smooth-min blending
+// is not associative: keep primitive order stable between frames to avoid
+// abrupt changes to the shape and lighting.
 type Group struct {
 	Circles []Circle
 	Bridges []Bridge

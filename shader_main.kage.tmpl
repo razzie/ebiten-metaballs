@@ -38,6 +38,8 @@ func Fragment(dstPos vec4) vec4 {
 	var fields [MaxGroups]vec4
 
 	// Evaluate every primitive once, accumulating into its own group's smooth distance field.
+	// Smooth-min is not associative; callers must keep primitive order stable
+	// between frames to avoid shape changes when the same geometry is reordered.
 	// Do not cut off individual distances at SmoothK: positive intermediate
 	// blends can carry their influence into the final contour.
 	// Count checks are uniform across pixels; keep them to skip unused slots.
