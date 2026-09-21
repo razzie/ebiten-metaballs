@@ -31,6 +31,52 @@ between outer shells and `Config.AttractionStrength` as the force at contact.
 The force fades quadratically to zero across that gap; shell and core collision
 responses still prevent collapse. Both values must be positive to enable it.
 
+## Bridges
+
+`State.AddBridge` connects two circles using the stable IDs returned by
+`AddCircle`. Each bridge has its own distance limits and force magnitudes:
+
+```go
+bridgeID, err := world.AddBridge(softbody.BridgeSpec{
+    A: circleAID, B: circleBID,
+    MinDistance: 0.08,
+    MaxDistance: 0.12,
+    BreakDistance: 0.25,
+    AttractForce: 2,
+    RepelForce: 3,
+})
+if err != nil {
+    panic(err)
+}
+_ = bridgeID // Pass to world.RemoveBridge to disconnect manually.
+```
+
+Distances are measured between circle centers in world units. Below
+`MinDistance`, the bridge repels with constant magnitude `RepelForce`; above
+`MaxDistance`, it attracts with constant magnitude `AttractForce`. Inside the
+inclusive range it applies no force. Forces are equal and opposite and divided
+by each circle's mass to obtain acceleration. Zero disables the corresponding
+force. Multiple bridges add their forces, including bridges sharing endpoints.
+Coincident centers repel along a deterministic horizontal direction.
+
+A positive `BreakDistance` permanently removes the bridge when exceeded, before
+applying any bridge force in that substep. Zero makes it unbreakable. All limits
+and forces must be finite and nonnegative, `MinDistance <= MaxDistance`, and a
+nonzero `BreakDistance` must be at least `MaxDistance`. Endpoints must be distinct
+existing circles; their groups and separation do not restrict bridge creation.
+
+`State.BridgeSnapshot(dst)` copies active bridges and their stable bridge IDs,
+omitting broken or manually removed bridges. Bridge IDs are separate from circle
+IDs. `RemoveBridge(id)` reports whether an active bridge was removed. These APIs
+must run on the simulation goroutine, like `AddCircle` and `Snapshot`.
+
+Bridges apply forces every substep, independent of the collision grid's neighbor
+range. They have no collision geometry and do not interact with other bridges,
+circles along their length, or walls. Endpoint circles retain their ordinary
+collisions. Rendering bridges is the caller's responsibility.
+
+## External impulses
+
 External attraction and repulsion use `State.QueueRadialImpulse`. Each impulse
 specifies a source in world coordinates, radius, signed strength, and optional
 list of target groups. Positive strength pushes outward; negative strength pulls
@@ -68,6 +114,8 @@ cells. Therefore cell jobs can run concurrently without atomics or per-cell
 locks. Pair interactions are intentionally evaluated from both directions:
 A computes the effect of B on A, and B independently computes the effect of A on
 B. This trades some arithmetic for race-free parallelism and SIMD-friendly spans.
+Bridge forces are accumulated serially after cell jobs finish, so bridges sharing
+endpoints do not race with each other or with collisions.
 
 ## SIMD
 

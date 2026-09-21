@@ -40,6 +40,32 @@ type CircleSnapshot struct {
 	OuterRadius float32
 }
 
+// BridgeSpec connects two distinct circles by their stable IDs. Distances are
+// measured between centers, regardless of radii or groups. All distances and
+// forces must be finite and nonnegative, with MinDistance <= MaxDistance.
+// Bridges have no collision geometry; their endpoint circles still collide.
+type BridgeSpec struct {
+	A, B uint64
+
+	MinDistance float32
+	MaxDistance float32
+	// BreakDistance removes the bridge when exceeded, before applying force.
+	// Zero makes the bridge unbreakable; otherwise it must be >= MaxDistance.
+	BreakDistance float32
+
+	// AttractForce and RepelForce are constant force magnitudes applied above
+	// MaxDistance and below MinDistance, respectively. Zero disables that force.
+	// No bridge force is applied inside the inclusive distance range.
+	AttractForce float32
+	RepelForce   float32
+}
+
+// BridgeSnapshot describes an active bridge. Broken bridges are omitted.
+type BridgeSnapshot struct {
+	ID uint64
+	BridgeSpec
+}
+
 // Bounds defines the rectangular simulation world in circle coordinates.
 type Bounds struct {
 	MinX, MinY, MaxX, MaxY float32
@@ -122,6 +148,10 @@ type State struct {
 	p       particleData
 	scratch particleData
 	nextID  uint64
+
+	bridges      []BridgeSnapshot
+	nextBridgeID uint64
+	bridgeIndex  []int
 
 	maxOuter      float32
 	geometryDirty bool

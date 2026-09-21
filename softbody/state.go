@@ -170,6 +170,7 @@ func (s *State) Step(dt float32) {
 			subImpulses = impulses
 		}
 		s.solveCells(subImpulses)
+		s.solveBridges()
 		s.integrate(h)
 	}
 }
