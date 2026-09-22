@@ -29,10 +29,10 @@ const (
 	bridgeRadius         = minRadius / 4
 
 	cursorRadius    = 0.35
-	cursorImpulse   = 3.0 / ticksPerSecond
+	cursorImpulse   = 1.0 / ticksPerSecond
 	smoothK         = 0.015
 	edgeThickness   = 0.03
-	borderThickness = 0.004
+	borderThickness = 0.006
 )
 
 type circleLocation struct {
@@ -83,13 +83,14 @@ func populateWorld(world *softbody.State) error {
 				if previous != 0 {
 					// Leave some slack around the starting separation. Zero
 					// BreakDistance keeps chains connected during interaction.
+					// Stiffness 12 gives force 0.6 at 0.05 units outside the range.
 					distance := 2 * radius * float32(math.Sin(math.Pi/float64(count)))
 					_, err := world.AddBridge(softbody.BridgeSpec{
 						A: previous, B: id,
 						MinDistance:  distance * 0.8,
 						MaxDistance:  distance * 1.2,
-						AttractForce: 0.6,
-						RepelForce:   0.6,
+						AttractForce: 16,
+						RepelForce:   16,
 					})
 					if err != nil {
 						return fmt.Errorf("add bridge: %w", err)

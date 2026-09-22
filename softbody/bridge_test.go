@@ -38,25 +38,57 @@ func TestBridgeForces(t *testing.T) {
 		distance float32
 		wantVX   float32
 	}{
-		{"repel", .125, -.03},
+		{"repel strongly", .0625, -.005625},
+		{"repel", .125, -.00375},
+		{"repel weakly", .1875, -.001875},
 		{"at minimum", .25, 0},
 		{"inside range", .375, 0},
 		{"at maximum", .5, 0},
-		{"attract", .625, .02},
+		{"attract weakly", .5625, .00125},
+		{"attract", .625, .0025},
+		{"attract strongly", .75, .005},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			for _, substeps := range []int{1, 4} {
-				s, left, right := bridgeWorld(t, tt.distance, substeps)
-				addTestBridge(t, s, BridgeSpec{A: left, B: right, MinDistance: .25, MaxDistance: .5, AttractForce: 2, RepelForce: 3})
-				s.Step(.01)
-				for _, c := range s.Snapshot(nil) {
-					want := tt.wantVX
-					if c.ID == right {
-						want = -want / 2
-					}
-					if math.Abs(float64(c.VX-want)) > 1e-7 || c.VY != 0 {
-						t.Fatalf("substeps %d: circle %+v, want VX %g", substeps, c, want)
-					}
+			s, left, right := bridgeWorld(t, tt.distance, 1)
+			addTestBridge(t, s, BridgeSpec{A: left, B: right, MinDistance: .25, MaxDistance: .5, AttractForce: 2, RepelForce: 3})
+			s.Step(.01)
+			for _, c := range s.Snapshot(nil) {
+				want := tt.wantVX
+				if c.ID == right {
+					want = -want / 2
+				}
+				if math.Abs(float64(c.VX-want)) > 1e-7 || c.VY != 0 {
+					t.Fatalf("circle %+v, want VX %g", c, want)
+				}
+			}
+		})
+	}
+}
+
+func TestBridgeForceChangesBetweenSubsteps(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		distance float32
+		wantVX   float32
+	}{
+		// Two 0.125-second substeps. The first moves the endpoints closer to
+		// the allowed range, reducing the force applied in the second.
+		// Attraction: forces 0.25 then 0.23828125.
+		{"attract", .625, .06103515625},
+		// Repulsion: forces 0.375 then 0.3486328125.
+		{"repel", .125, -.0904541015625},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s, left, right := bridgeWorld(t, tt.distance, 2)
+			addTestBridge(t, s, BridgeSpec{A: left, B: right, MinDistance: .25, MaxDistance: .5, AttractForce: 2, RepelForce: 3})
+			s.Step(.25)
+			for _, c := range s.Snapshot(nil) {
+				want := tt.wantVX
+				if c.ID == right {
+					want = -want / 2
+				}
+				if math.Abs(float64(c.VX-want)) > 1e-7 || c.VY != 0 {
+					t.Fatalf("circle %+v, want VX %g", c, want)
 				}
 			}
 		})
@@ -172,9 +204,9 @@ func TestBridgeLifecycleAndSnapshot(t *testing.T) {
 		t.Fatal("snapshot aliases bridge state")
 	}
 	for _, c := range s.Snapshot(nil) {
-		wantVX := float32(.04)
+		wantVX := float32(.01)
 		if c.ID == right {
-			wantVX = -.02
+			wantVX = -.005
 		}
 		if math.Abs(float64(c.VX-wantVX)) > 1e-7 {
 			t.Fatalf("surviving bridges did not add forces: %+v", c)
@@ -205,10 +237,10 @@ func TestBridgeDirection(t *testing.T) {
 			s.ensureWorkBuffers()
 			s.solveBridges() // Isolate bridge force from coincident core collisions.
 			if coincident {
-				if s.ax[0] != -1.5 || s.ax[1] != 3 || s.ay[0] != 0 || s.ay[1] != 0 {
+				if s.ax[0] != -.1875 || s.ax[1] != .375 || s.ay[0] != 0 || s.ay[1] != 0 {
 					t.Fatal("coincident endpoints did not repel in a stable direction")
 				}
-			} else if s.ax[0] != 0 || s.ax[1] != 0 || s.ay[0] != -1 || s.ay[1] != 2 {
+			} else if s.ax[0] != 0 || s.ax[1] != 0 || s.ay[0] != -.25 || s.ay[1] != .5 {
 				t.Fatal("bridge force did not follow endpoint direction")
 			}
 		}

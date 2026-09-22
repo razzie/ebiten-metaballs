@@ -53,8 +53,10 @@ type BridgeSpec struct {
 	// Zero makes the bridge unbreakable; otherwise it must be >= MaxDistance.
 	BreakDistance float32
 
-	// AttractForce and RepelForce are constant force magnitudes applied above
-	// MaxDistance and below MinDistance, respectively. Zero disables that force.
+	// AttractForce and RepelForce are spring stiffnesses (force per world unit).
+	// Attraction is AttractForce * (distance - MaxDistance) above MaxDistance;
+	// repulsion is RepelForce * (MinDistance - distance) below MinDistance.
+	// Zero disables the corresponding force.
 	// No bridge force is applied inside the inclusive distance range.
 	AttractForce float32
 	RepelForce   float32

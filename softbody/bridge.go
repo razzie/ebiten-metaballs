@@ -72,9 +72,9 @@ func (s *State) solveBridges() {
 		var force float32
 		switch {
 		case d < float64(b.MinDistance):
-			force = -b.RepelForce
+			force = -float32(float64(b.RepelForce) * (float64(b.MinDistance) - d))
 		case d > float64(b.MaxDistance):
-			force = b.AttractForce
+			force = float32(float64(b.AttractForce) * (d - float64(b.MaxDistance)))
 		default:
 			continue
 		}

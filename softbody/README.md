@@ -34,7 +34,7 @@ responses still prevent collapse. Both values must be positive to enable it.
 ## Bridges
 
 `State.AddBridge` connects two circles using the stable IDs returned by
-`AddCircle`. Each bridge has its own distance limits and force magnitudes:
+`AddCircle`. Each bridge has its own distance limits and spring stiffnesses:
 
 ```go
 bridgeID, err := world.AddBridge(softbody.BridgeSpec{
@@ -52,12 +52,19 @@ _ = bridgeID // Pass to world.RemoveBridge to disconnect manually.
 ```
 
 Distances are measured between circle centers in world units. Below
-`MinDistance`, the bridge repels with constant magnitude `RepelForce`; above
-`MaxDistance`, it attracts with constant magnitude `AttractForce`. Inside the
-inclusive range it applies no force. Forces are equal and opposite and divided
+`MinDistance`, the bridge repels with magnitude `RepelForce * (MinDistance - distance)`;
+above `MaxDistance`, it attracts with magnitude `AttractForce * (distance - MaxDistance)`.
+The force fields specify stiffness (force per world unit): doubling the stretch
+or compression outside the range doubles the force. Inside the inclusive range
+it applies no force, so force grows continuously from zero at either limit.
+Forces are equal and opposite and divided
 by each circle's mass to obtain acceleration. Zero disables the corresponding
 force. Multiple bridges add their forces, including bridges sharing endpoints.
 Coincident centers repel along a deterministic horizontal direction.
+
+These fields previously specified constant forces. To match an old force at a
+chosen stretch or compression, divide that force by the distance outside the
+range to obtain the new stiffness.
 
 A positive `BreakDistance` permanently removes the bridge when exceeded, before
 applying any bridge force in that substep. Zero makes it unbreakable. All limits
