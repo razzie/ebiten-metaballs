@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"os/exec"
+	"sync"
 	"testing"
 
 	"github.com/hajimehoshi/ebiten/v2"
@@ -34,6 +35,7 @@ type subdivisionTestGame struct{ t *testing.T }
 func (*subdivisionTestGame) Layout(int, int) (int, int) { return 64, 64 }
 func (*subdivisionTestGame) Draw(*ebiten.Image)         {}
 func (g *subdivisionTestGame) Update() error {
+	g.t.Run("concurrent outline buffers", checkConcurrentOutlineBuffers)
 	for _, test := range []struct {
 		name                  string
 		workers, roots, depth int
@@ -42,6 +44,7 @@ func (g *subdivisionTestGame) Update() error {
 		{name: "two workers", workers: 2, roots: 1, depth: 2},
 		{name: "four workers", workers: 4, roots: 1, depth: 4},
 		{name: "multiple roots", workers: 4, roots: 2, depth: 2},
+		{name: "debug outlines", workers: 6, roots: 1, depth: 3, debug: true},
 		{name: "debug and FXAA", workers: 4, roots: 2, depth: 2, debug: true, fxaa: true},
 	} {
 		g.t.Run(test.name, func(t *testing.T) {
@@ -100,4 +103,49 @@ func renderSubdivision(t *testing.T, cfg RendererConfig, groups []Group) ([]byte
 	pixels := make([]byte, 64*64*4)
 	dst.ReadPixels(pixels)
 	return pixels, [3]int32{stats.TilesDrawn.Load(), stats.TilesSkipped.Load(), stats.CirclesClipped.Load()}
+}
+
+// Exercise outlines without subsequent tile fills hiding corrupted vertices.
+func checkConcurrentOutlineBuffers(t *testing.T) {
+	const size, cell = 128, 16
+	dst := ebiten.NewImage(size, size)
+	defer dst.Deallocate()
+	xform, _ := NewCenteredUVTransform(size, size)
+	r := &Renderer{}
+	pixels := make([]byte, size*size*4)
+	for frame := 0; frame < 20; frame++ {
+		dst.Clear()
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for y := 0; y < size; y += cell {
+			for x := 0; x < size; x += cell {
+				tile := UVBounds{float32(x) / size, float32(y) / size, float32(x+cell) / size, float32(y+cell) / size}
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					<-start
+					r.drawDebugOutline(dst, xform, tile)
+				}()
+			}
+		}
+		close(start)
+		wg.Wait()
+		dst.ReadPixels(pixels)
+		visible := false
+		for y := 0; y < size; y++ {
+			for x := 0; x < size; x++ {
+				a := pixels[4*(y*size+x)+3]
+				visible = visible || a != 0
+				if x%cell < 2 || x%cell >= cell-2 || y%cell < 2 || y%cell >= cell-2 {
+					continue
+				}
+				if a != 0 {
+					t.Fatalf("frame %d: stray outline at interior pixel (%d, %d)", frame, x, y)
+				}
+			}
+		}
+		if !visible {
+			t.Fatal("expected visible debug outlines")
+		}
+	}
 }

@@ -47,9 +47,7 @@ type RendererConfig struct {
 	// Workers controls how many goroutines split up the root grid's CPU work
 	// (probing, subdivision, and group materialization). 0 or 1 (the default)
 	// keeps Draw fully serial with no added overhead; when Workers > 1, CPU
-	// filtering work runs in parallel across worker goroutines and pushes
-	// draw tasks to a channel, while all Ebiten GPU draw calls execute
-	// sequentially on the main goroutine.
+	// filtering and sub-image draw calls run concurrently across workers.
 	Workers int
 
 	// PoolMaxCircles, PoolMaxBridges and PoolMaxGroups optionally hint the
@@ -486,8 +484,12 @@ func (r *Renderer) drawDebugOutline(dst *ebiten.Image, xform UVTransform, tile U
 		return
 	}
 
+	// DrawImage uses scratch vertices stored on its destination *Image.
+	// Each concurrent outline needs its own sub-image, just like the metaball draws.
+	dst = dst.SubImage(pixelRect).(*ebiten.Image)
+
 	minX, minY := float32(pixelRect.Min.X), float32(pixelRect.Min.Y)
-	maxX, maxY := float32(pixelRect.Max.X), float32(pixelRect.Max.Y)
+	maxX, maxY := float32(pixelRect.Max.X-1), float32(pixelRect.Max.Y-1)
 
 	vector.StrokeLine(dst, minX, minY, maxX, minY, 1, debugTopLeftColor, false)
 	vector.StrokeLine(dst, minX, minY, minX, maxY, 1, debugTopLeftColor, false)

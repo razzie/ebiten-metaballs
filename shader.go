@@ -110,6 +110,12 @@ func NewMetaballShader(config ShaderConfig) (*MetaballShader, error) {
 
 	ms := &MetaballShader{shader: shader, config: config}
 	ms.pools.init(config.ShaderCapacity)
+	// Ebitengine 2.9 lazily computes its shader uniform size on the first
+	// draw, outside the engine's rendering lock. Initialize it before this
+	// shader is shared by tile workers. All scene draws remain concurrent.
+	warmup := ebiten.NewImage(1, 1)
+	warmup.DrawRectShader(1, 1, shader, nil)
+	warmup.Deallocate()
 
 	if config.FxaaEnabled && !config.rendererFxaaEnabled {
 		var fxaaSrc bytes.Buffer
