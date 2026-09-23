@@ -41,23 +41,37 @@ type CircleSnapshot struct {
 }
 
 // BridgeSpec connects two distinct circles by their stable IDs. Distances are
-// measured between centers, regardless of radii or groups. All distances and
-// forces must be finite and nonnegative, with MinDistance <= MaxDistance.
+// measured between centers, regardless of radii or groups. Distances, forces,
+// and damping must be finite and nonnegative, with MinDistance <= MaxDistance.
 // Bridges have no collision geometry; their endpoint circles still collide.
 type BridgeSpec struct {
 	A, B uint64
 
 	MinDistance float32
 	MaxDistance float32
-	// BreakDistance removes the bridge when exceeded, before applying force.
+	// BreakDistance removes the bridge when exceeded, before applying force
+	// or solving constraints. Constraint/damped bridges also check predicted
+	// positions before corrections, so solving cannot hide a pending break.
 	// Zero makes the bridge unbreakable; otherwise it must be >= MaxDistance.
 	BreakDistance float32
+
+	// ConstrainDistance enforces [MinDistance, MaxDistance] with iterative,
+	// inverse-mass-weighted position corrections instead of spring forces.
+	// AttractForce and RepelForce are ignored in this mode. Equal limits make
+	// a fixed-length link; MinDistance == 0 makes a slack rope.
+	ConstrainDistance bool
+
+	// Damping resists relative velocity along the bridge, including within
+	// the slack range, in force per unit speed. Zero disables it. It does not
+	// resist shared translation or tangential relative motion. Applies in both
+	// spring and constraint modes and is solved implicitly for stability.
+	Damping float32
 
 	// AttractForce and RepelForce are spring stiffnesses (force per world unit).
 	// Attraction is AttractForce * (distance - MaxDistance) above MaxDistance;
 	// repulsion is RepelForce * (MinDistance - distance) below MinDistance.
 	// Zero disables the corresponding force.
-	// No bridge force is applied inside the inclusive distance range.
+	// No spring force is applied inside the inclusive distance range.
 	AttractForce float32
 	RepelForce   float32
 }
@@ -81,6 +95,11 @@ type Config struct {
 	Workers  int
 	Substeps int
 
+	// BridgeIterations is the number of constraint and damping solver passes
+	// per substep. Zero selects the default (8); negative values become 1.
+	// More passes improve load propagation through long chains.
+	BridgeIterations int
+
 	ShellStiffness float32
 	ShellDamping   float32
 	Restitution    float32
@@ -102,13 +121,14 @@ type Config struct {
 
 func DefaultConfig() Config {
 	return Config{
-		Workers:        runtime.GOMAXPROCS(0),
-		Substeps:       2,
-		ShellStiffness: 80,
-		ShellDamping:   2.5,
-		Restitution:    0.08,
-		CoreCorrection: 0.8,
-		LinearDamping:  0.25,
+		Workers:          runtime.GOMAXPROCS(0),
+		Substeps:         2,
+		BridgeIterations: 8,
+		ShellStiffness:   80,
+		ShellDamping:     2.5,
+		Restitution:      0.08,
+		CoreCorrection:   0.8,
+		LinearDamping:    0.25,
 	}
 }
 
@@ -151,9 +171,10 @@ type State struct {
 	scratch particleData
 	nextID  uint64
 
-	bridges      []BridgeSnapshot
-	nextBridgeID uint64
-	bridgeIndex  []int
+	bridges              []BridgeSnapshot
+	nextBridgeID         uint64
+	bridgeIndex          []int
+	bridgeDampingImpulse []float64
 
 	maxOuter      float32
 	geometryDirty bool

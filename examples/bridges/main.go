@@ -72,8 +72,8 @@ func populateWorld(world *softbody.State) error {
 					Y:           cy + radius*float32(math.Sin(angle)),
 					VX:          (rand.Float32() - 0.5) * 0.06,
 					VY:          (rand.Float32() - 0.5) * 0.06,
-					InnerRadius: outer * 0.75,
-					OuterRadius: outer,
+					InnerRadius: outer,
+					OuterRadius: outer * 1.5,
 					Mass:        size * size,
 					Group:       softbody.Group(group),
 				})
@@ -83,14 +83,14 @@ func populateWorld(world *softbody.State) error {
 				if previous != 0 {
 					// Leave some slack around the starting separation. Zero
 					// BreakDistance keeps chains connected during interaction.
-					// Stiffness 12 gives force 0.6 at 0.05 units outside the range.
+					// Solve length limits together so pulls propagate along the chain.
 					distance := 2 * radius * float32(math.Sin(math.Pi/float64(count)))
 					_, err := world.AddBridge(softbody.BridgeSpec{
 						A: previous, B: id,
-						MinDistance:  distance * 0.8,
-						MaxDistance:  distance * 1.2,
-						AttractForce: 16,
-						RepelForce:   16,
+						MinDistance:       distance * 0.8,
+						MaxDistance:       distance * 1.2,
+						ConstrainDistance: true,
+						Damping:           2.5,
 					})
 					if err != nil {
 						return fmt.Errorf("add bridge: %w", err)
@@ -127,7 +127,7 @@ func NewGame() (*Game, error) {
 	g.syncGeometry()
 	for i, common := range [...]metaballs.ShaderCommonConfig{
 		{SmoothK: smoothK, LightDirX: 1, LightDirY: -1, EdgeThickness: edgeThickness, FxaaEnabled: true},
-		{SmoothK: smoothK, BorderThickness: borderThickness, FxaaEnabled: true},
+		{SmoothK: smoothK, LightDirX: 1, LightDirY: -1, EdgeThickness: edgeThickness, BorderThickness: borderThickness, FxaaEnabled: true},
 	} {
 		renderer, err := metaballs.NewRenderer(metaballs.RendererConfig{
 			Common: common,

@@ -12,14 +12,14 @@ func TestNewConfig(t *testing.T) {
 	zeroDefaults := defaults
 	zeroDefaults.Restitution = 0 // Zero restitution explicitly requests no bounce.
 	custom := Config{
-		GridSpacing: .1, Workers: 3, Substeps: 4,
+		GridSpacing: .1, Workers: 3, Substeps: 4, BridgeIterations: 12,
 		ShellStiffness: 12, ShellDamping: 3, Restitution: .5,
 		CoreCorrection: .7, LinearDamping: .2,
 		LinearDampingMassFactor: .5,
 		AttractionRange:         .3, AttractionStrength: 2,
 	}
 	clamped := zeroDefaults
-	clamped.Workers, clamped.Substeps = 1, 1
+	clamped.Workers, clamped.Substeps, clamped.BridgeIterations = 1, 1, 1
 	maxRestitution := zeroDefaults
 	maxRestitution.Restitution = 1
 	for _, tt := range []struct {
@@ -29,7 +29,7 @@ func TestNewConfig(t *testing.T) {
 		{"zero", Config{}, zeroDefaults},
 		{"defaults", defaults, defaults},
 		{"custom", custom, custom},
-		{"negative counts and restitution", Config{Workers: -2, Substeps: -3, Restitution: -1}, clamped},
+		{"negative counts and restitution", Config{Workers: -2, Substeps: -3, BridgeIterations: -4, Restitution: -1}, clamped},
 		{"excess restitution", Config{Restitution: 2}, maxRestitution},
 		{"negative mass damping factor", Config{LinearDampingMassFactor: -1}, zeroDefaults},
 	} {

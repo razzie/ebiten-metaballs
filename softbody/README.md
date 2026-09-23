@@ -24,7 +24,8 @@ of `1` gives masses `0.25`, `1`, and `4` rates of `1.25`, `2`, and `5` times the
 base rate. To make larger circles damp more, assign larger masses, as the physics
 example does with mass proportional to area. Negative factors are clamped to
 zero. A zero `LinearDamping` selects the default rate; a negative value disables
-all velocity damping, including the mass contribution.
+global velocity damping, including the mass contribution. Per-bridge damping
+is configured separately.
 
 Optional same-group attraction uses `Config.AttractionRange` as the maximum gap
 between outer shells and `Config.AttractionStrength` as the force at contact.
@@ -34,7 +35,8 @@ responses still prevent collapse. Both values must be positive to enable it.
 ## Bridges
 
 `State.AddBridge` connects two circles using the stable IDs returned by
-`AddCircle`. Each bridge has its own distance limits and spring stiffnesses:
+`AddCircle`. Each bridge has its own distance limits. Enable `ConstrainDistance`
+for a chain with firm length limits, or leave it false for spring connections:
 
 ```go
 bridgeID, err := world.AddBridge(softbody.BridgeSpec{
@@ -42,8 +44,8 @@ bridgeID, err := world.AddBridge(softbody.BridgeSpec{
     MinDistance: 0.08,
     MaxDistance: 0.12,
     BreakDistance: 0.25,
-    AttractForce: 2,
-    RepelForce: 3,
+    ConstrainDistance: true,
+    Damping: 2.5,
 })
 if err != nil {
     panic(err)
@@ -51,12 +53,59 @@ if err != nil {
 _ = bridgeID // Pass to world.RemoveBridge to disconnect manually.
 ```
 
-Distances are measured between circle centers in world units. Below
+Distances are measured between circle centers in world units.
+
+### Distance constraints
+
+With `ConstrainDistance: true`, each substep predicts movement, then repeatedly
+corrects bridge lengths into `[MinDistance, MaxDistance]`. Corrections are shared
+in proportion to inverse mass: a mass-1 circle moves four times as far as a mass-4
+circle. The velocity changes from these corrections carry the response into the
+next substep. Links are solved sequentially, alternating traversal direction on
+each pass, so corrections propagate along a chain within the same substep.
+
+Equal minimum and maximum distances make a fixed-length link. A zero minimum
+makes a rope that can go slack. `AttractForce` and `RepelForce` are ignored in
+constraint mode; both limits remain active even when those fields are zero.
+Constraints do not resist bending or give the bridge collision geometry.
+
+`Config.BridgeIterations` defaults to 8 passes per substep. Increase it for longer
+chains or tighter length tolerances; increase `Substeps` for fast motion. A finite
+number of passes can leave some distance error, especially in long chains or
+crowded contacts. This is a hard distance solver, not a compliant spring solver.
+
+Hard-core contacts and wall confinement are interleaved with the bridge passes.
+The collision grid and stable-ID lookup are refreshed after bridge movement, so
+corrections can create new contacts without leaving stale endpoint indices.
+Shell forces and external impulses are not reapplied during these passes.
+Collision corrections take precedence at the end of a pass; conflicting limits
+(such as a maximum distance smaller than the combined core radii) cannot all be
+satisfied. More iterations cost additional bridge, grid, and contact work.
+
+### Damping
+
+`BridgeSpec.Damping` is an axial damping coefficient in force per unit speed.
+It works in both modes and also inside the slack interval. Positive values resist
+endpoints approaching or separating, but do not resist shared translation or
+instantaneous tangential motion. Zero disables damping. Unlike global
+`LinearDamping`, it preserves the pair's total linear momentum.
+
+Damping uses an implicit velocity solve after the position corrections. For an
+isolated bridge, relative axial speed is divided by
+`1 + Damping * dt * (1/massA + 1/massB)` per substep. Accumulated impulses keep
+extra solver passes from multiplying the damping strength; extra passes improve
+convergence when bridges share circles. The bridges example uses `Damping: 2.5`.
+
+### Spring connections
+
+With `ConstrainDistance: false` (the default), existing spring behavior is
+preserved. Below
 `MinDistance`, the bridge repels with magnitude `RepelForce * (MinDistance - distance)`;
 above `MaxDistance`, it attracts with magnitude `AttractForce * (distance - MaxDistance)`.
 The force fields specify stiffness (force per world unit): doubling the stretch
 or compression outside the range doubles the force. Inside the inclusive range
-it applies no force, so force grows continuously from zero at either limit.
+it applies no spring force, so force grows continuously from zero at either limit.
+Optional bridge damping still applies.
 Forces are equal and opposite and divided
 by each circle's mass to obtain acceleration. Zero disables the corresponding
 force. Multiple bridges add their forces, including bridges sharing endpoints.
@@ -66,9 +115,14 @@ These fields previously specified constant forces. To match an old force at a
 chosen stretch or compression, divide that force by the distance outside the
 range to obtain the new stiffness.
 
+### Lifecycle and collisions
+
 A positive `BreakDistance` permanently removes the bridge when exceeded, before
-applying any bridge force in that substep. Zero makes it unbreakable. All limits
-and forces must be finite and nonnegative, `MinDistance <= MaxDistance`, and a
+applying any bridge force in that substep. Constraint or damped bridges also
+check predicted positions before corrections or damping, so a correction cannot
+hide a break. Transient positions during solver passes do not trigger breaks.
+Zero makes a bridge unbreakable. All limits, forces, and damping coefficients
+must be finite and nonnegative, `MinDistance <= MaxDistance`, and a
 nonzero `BreakDistance` must be at least `MaxDistance`. Endpoints must be distinct
 existing circles; their groups and separation do not restrict bridge creation.
 
@@ -77,7 +131,7 @@ omitting broken or manually removed bridges. Bridge IDs are separate from circle
 IDs. `RemoveBridge(id)` reports whether an active bridge was removed. These APIs
 must run on the simulation goroutine, like `AddCircle` and `Snapshot`.
 
-Bridges apply forces every substep, independent of the collision grid's neighbor
+Bridges are solved every substep, independent of the collision grid's neighbor
 range. They have no collision geometry and do not interact with other bridges,
 circles along their length, or walls. Endpoint circles retain their ordinary
 collisions. Rendering bridges is the caller's responsibility.
@@ -121,7 +175,8 @@ cells. Therefore cell jobs can run concurrently without atomics or per-cell
 locks. Pair interactions are intentionally evaluated from both directions:
 A computes the effect of B on A, and B independently computes the effect of A on
 B. This trades some arithmetic for race-free parallelism and SIMD-friendly spans.
-Bridge forces are accumulated serially after cell jobs finish, so bridges sharing
+Bridge forces are accumulated serially after cell jobs finish. Constraint,
+contact-projection, and damping passes also run serially, so bridges sharing
 endpoints do not race with each other or with collisions.
 
 ## SIMD

@@ -153,10 +153,10 @@ func TestBridgeValidation(t *testing.T) {
 		b.A, b.B = endpoints[0], endpoints[1]
 		invalid = append(invalid, b)
 	}
-	for field := range 5 {
+	for field := range 6 {
 		for _, value := range []float32{-1, float32(math.NaN()), float32(math.Inf(1)), float32(math.Inf(-1))} {
 			b := valid
-			fields := []*float32{&b.MinDistance, &b.MaxDistance, &b.BreakDistance, &b.AttractForce, &b.RepelForce}
+			fields := []*float32{&b.MinDistance, &b.MaxDistance, &b.BreakDistance, &b.AttractForce, &b.RepelForce, &b.Damping}
 			*fields[field] = value
 			invalid = append(invalid, b)
 		}

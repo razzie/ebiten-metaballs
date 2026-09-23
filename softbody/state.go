@@ -13,6 +13,10 @@ func New(cfg Config) *State {
 	if cfg.Substeps == 0 {
 		cfg.Substeps = d.Substeps
 	}
+	if cfg.BridgeIterations == 0 {
+		cfg.BridgeIterations = d.BridgeIterations
+	}
+	cfg.BridgeIterations = max(cfg.BridgeIterations, 1)
 	if cfg.ShellStiffness == 0 {
 		cfg.ShellStiffness = d.ShellStiffness
 	}
@@ -172,6 +176,7 @@ func (s *State) Step(dt float32) {
 		s.solveCells(subImpulses)
 		s.solveBridges()
 		s.integrate(h)
+		s.solveBridgeConstraints(h)
 	}
 }
 
