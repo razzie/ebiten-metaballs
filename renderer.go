@@ -575,13 +575,7 @@ func (r *Renderer) prepareGroupsForTile(groups []Group, tile UVBounds) (prep []g
 		}
 
 		included := &p[i].included
-		// A distant primitive can influence later blends through a chain of
-		// positive intermediate distances. Each blend can carry that influence
-		// at most K closer to the contour. Keep an additional K/2 for the
-		// positive competing distances used by contact rounding.
-		padding := (float32(len(g.Circles)+len(g.Bridges)) + 0.5) * r.cfg.Common.SmoothK
-		// Bordered joints and narrow bridges can extend beyond their input radii.
-		padding += r.cfg.Common.BorderThickness
+		padding := r.cfg.Common.SmoothK + r.cfg.Common.BorderThickness
 		if !computeIncludedSet(&r.pools, g, tile, included, padding) {
 			continue
 		}
