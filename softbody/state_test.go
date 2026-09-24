@@ -47,6 +47,7 @@ func TestIntegrationUsesRectangularBounds(t *testing.T) {
 	p.resize(count)
 	b := Bounds{MinX: -2, MinY: -1, MaxX: 3, MaxY: 2}
 	for i := range count {
+		p.invMass[i] = 1
 		p.x[i], p.y[i], p.inner[i] = .5, .5, .02
 		p.vx[i], p.vy[i] = 100, 100
 		if i%2 == 0 {

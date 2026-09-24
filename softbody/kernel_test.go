@@ -67,6 +67,7 @@ func TestIntegrateKernelForcesAndCorrections(t *testing.T) {
 			p.resize(n)
 			ax, ay, dvx, dvy, cx, cy := make([]float32, n), make([]float32, n), make([]float32, n), make([]float32, n), make([]float32, n), make([]float32, n)
 			for i := range n {
+				p.invMass[i] = 1
 				p.x[i], p.y[i], p.vx[i], p.vy[i], p.inner[i] = .5, .5, .2, -.4, .1
 				ax[i], ay[i], dvx[i], dvy[i], cx[i], cy[i] = .4, -.8, .1, .2, .02, -.01
 			}
@@ -82,5 +83,39 @@ func TestIntegrateKernelForcesAndCorrections(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestIntegrateKernelPreservesKinematicCircles(t *testing.T) {
+	for _, massDamping := range []float32{0, .5} {
+		for _, workers := range []int{1, 4} {
+			t.Run(fmt.Sprintf("massDamping=%g/workers=%d", massDamping, workers), func(t *testing.T) {
+				// Mix held and free lanes in full SIMD vectors, parallel chunks,
+				// and the scalar tail, with forces and wall corrections present.
+				const n = 1025
+				var p particleData
+				p.resize(n)
+				force := make([]float32, n)
+				for i := range n {
+					p.x[i], p.y[i], p.vx[i], p.vy[i], p.inner[i] = .8, .8, 2, 2, .1
+					if i%2 != 0 {
+						p.invMass[i] = .5
+					}
+					force[i] = 1
+				}
+				integrateKernel(&p, force, force, force, force, force, force, .1, .2, massDamping, .5, Bounds{MaxX: 1, MaxY: 1}, workers)
+				for i := range n {
+					wantPosition, wantVelocity := float32(.8), float32(2)
+					if i%2 != 0 {
+						wantPosition = .9
+						wantVelocity = -.5 * 3.1 / (1.2 + massDamping/.5)
+					}
+					nearBridge(t, "position X", float64(p.x[i]), float64(wantPosition))
+					nearBridge(t, "position Y", float64(p.y[i]), float64(wantPosition))
+					nearBridge(t, "velocity X", float64(p.vx[i]), float64(wantVelocity))
+					nearBridge(t, "velocity Y", float64(p.vy[i]), float64(wantVelocity))
+				}
+			})
+		}
 	}
 }

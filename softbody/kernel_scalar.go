@@ -27,6 +27,9 @@ func integrateKernel(p *particleData, ax, ay, dvx, dvy, corrX, corrY []float32, 
 	damping := 1 / (1 + dampingStep)
 	parallelFor(p.len(), workers, 512, func(start, end int) {
 		for i := start; i < end; i++ {
+			if p.invMass[i] == 0 {
+				continue // Kinematic circle, positioned by carrySubstep.
+			}
 			particleDamping := damping
 			if massDampingStep > 0 {
 				particleDamping = 1 / (1 + dampingStep + massDampingStep/p.invMass[i])

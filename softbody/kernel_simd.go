@@ -177,10 +177,11 @@ func integrateKernel(p *particleData, ax, ay, dvx, dvy, corrX, corrY []float32, 
 
 		i := start
 		for ; i+lanes <= end; i += lanes {
+			invMass := simd.LoadFloat32s(p.invMass[i : i+lanes])
+			dynamic := invMass.Greater(zero)
 			particleDamping := vdamp
 			if massDampingStep > 0 {
-				invMass := simd.LoadFloat32s(p.invMass[i : i+lanes])
-				particleDamping = one.Div(vdampDenom.Add(vmassDamp.Div(invMass)))
+				particleDamping = one.Div(vdampDenom.Add(vmassDamp.Div(invMass.IfElse(dynamic, one))))
 			}
 			vx := simd.LoadFloat32s(p.vx[i : i+lanes]).Add(simd.LoadFloat32s(dvx[i : i+lanes]))
 			vy := simd.LoadFloat32s(p.vy[i : i+lanes]).Add(simd.LoadFloat32s(dvy[i : i+lanes]))
@@ -206,12 +207,20 @@ func integrateKernel(p *particleData, ax, ay, dvx, dvy, corrX, corrY []float32, 
 			vx = vx.Neg().Mul(vrest).IfElse(xBounce, vx)
 			vy = vy.Neg().Mul(vrest).IfElse(yBounce, vy)
 
+			// Held lanes keep their prescribed positions and velocities.
+			x = x.IfElse(dynamic, simd.LoadFloat32s(p.x[i:i+lanes]))
+			y = y.IfElse(dynamic, simd.LoadFloat32s(p.y[i:i+lanes]))
+			vx = vx.IfElse(dynamic, simd.LoadFloat32s(p.vx[i:i+lanes]))
+			vy = vy.IfElse(dynamic, simd.LoadFloat32s(p.vy[i:i+lanes]))
 			x.Store(p.x[i : i+lanes])
 			y.Store(p.y[i : i+lanes])
 			vx.Store(p.vx[i : i+lanes])
 			vy.Store(p.vy[i : i+lanes])
 		}
 		for ; i < end; i++ {
+			if p.invMass[i] == 0 {
+				continue // Kinematic circle, positioned by carrySubstep.
+			}
 			particleDamping := damping
 			if massDampingStep > 0 {
 				particleDamping = 1 / (1 + dampingStep + massDampingStep/p.invMass[i])

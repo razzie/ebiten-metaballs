@@ -22,6 +22,16 @@ type RadialImpulse struct {
 	Groups []Group
 }
 
+// DragSpec selects circles whose outer disks contain (X, Y), in world coordinates.
+// Hits are ordered by distance to their centers, then by stable ID.
+// MaxCircles <= 0 selects all hits; use 1 to grab only the nearest circle.
+// Empty Groups selects all groups. Bridges do not expand the selection.
+type DragSpec struct {
+	X, Y       float32
+	MaxCircles int
+	Groups     []Group
+}
+
 type CircleSpec struct {
 	X, Y        float32
 	VX, VY      float32
@@ -170,6 +180,9 @@ type State struct {
 	p       particleData
 	scratch particleData
 	nextID  uint64
+
+	dragged      []draggedCircle
+	dragX, dragY float32
 
 	bridges              []BridgeSnapshot
 	nextBridgeID         uint64

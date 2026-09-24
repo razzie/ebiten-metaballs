@@ -136,6 +136,53 @@ range. They have no collision geometry and do not interact with other bridges,
 circles along their length, or walls. Endpoint circles retain their ordinary
 collisions. Rendering bridges is the caller's responsibility.
 
+## Drag and drop
+
+Use three separate calls on the simulation goroutine, with pointer positions in
+world coordinates:
+
+```go
+// Left button pressed: hit-test once and grab the nearest circle.
+ids := world.Drag(softbody.DragSpec{X: x, Y: y, MaxCircles: 1})
+_ = ids // Stable IDs of the selected circles, nearest first.
+
+// While held: update the target; Step performs the movement.
+world.Carry(x, y)
+world.Step(1.0 / 60.0)
+
+// Left button released: apply the latest position and release at rest.
+world.Carry(x, y)
+world.Drop()
+```
+
+`Drag` tests outer disks, preserves the pointer-to-center grab offsets, and
+replaces any existing selection. `MaxCircles <= 0` grabs all hits; a positive
+value limits the selection. Ties use stable IDs, so grid sorting does not affect
+selection. Optional `Groups` filters the hits; empty means all groups. A miss
+leaves nothing selected. Nonfinite pointer coordinates are ignored.
+
+`Carry` never hit-tests again. The selected IDs survive grid reordering, and
+new circles under the pointer are not added. Motion to the latest target is
+spread over the next positive step's substeps. Each core is clamped to the world
+bounds, including after a resize; individual clamping can change the spacing of
+a multiple-circle selection at a wall. `Carry` and `Drop` are harmless without a
+selection. `Drop` restores original masses and clears velocity (no throwing),
+including when called before the next step.
+
+Held circles behave as moving anchors: collisions, forces, and bridge solvers
+cannot displace them. Free circles still collide with them, and connected
+circles follow through spring forces or distance constraints. Bridge damping
+uses the anchor's movement velocity. Bridges do not automatically select their
+other endpoints. Break distances remain active and are checked before constraint
+corrections; fast pointer motion can break a breakable bridge. If both endpoints
+are held, their prescribed positions take precedence over bridge limits and
+mutual core separation. Unbreakable bridges remain attached even when those
+limits cannot be satisfied. As usual, substeps are discrete, so very fast pointer
+motion can pass through circles between collision checks.
+
+The bridges example uses left drag for one circle, Shift+left drag for all hits,
+and right click for repulsion.
+
 ## External impulses
 
 External attraction and repulsion use `State.QueueRadialImpulse`. Each impulse

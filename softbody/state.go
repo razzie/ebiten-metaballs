@@ -166,6 +166,7 @@ func (s *State) Step(dt float32) {
 	impulses := s.consumeImpulses()
 	h := dt / float32(s.cfg.Substeps)
 	for sub := 0; sub < s.cfg.Substeps; sub++ {
+		s.carrySubstep(h, s.cfg.Substeps-sub)
 		s.rebuildGrid()
 		s.ensureWorkBuffers()
 

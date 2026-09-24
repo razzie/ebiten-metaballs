@@ -33,6 +33,9 @@ func (s *State) solveBridgeConstraints(dt float32) {
 				d, nx, ny := s.bridgeDirection(i, j)
 				target := min(max(d, float64(b.MinDistance)), float64(b.MaxDistance))
 				w := float64(s.p.invMass[i]) + float64(s.p.invMass[j])
+				if w == 0 {
+					continue // Both endpoints are held; the pointer takes precedence.
+				}
 				correction := (d - target) / w
 				dxi := float32(nx * correction * float64(s.p.invMass[i]))
 				dyi := float32(ny * correction * float64(s.p.invMass[i]))
@@ -99,6 +102,9 @@ func (s *State) projectBridgeContacts() {
 					}
 					d, nx, ny := s.bridgeDirection(i, j)
 					wi, wj := float64(s.p.invMass[i]), float64(s.p.invMass[j])
+					if wi+wj == 0 {
+						continue
+					}
 					correction := (inner - d) * float64(s.cfg.CoreCorrection) / (wi + wj)
 					s.p.x[i] -= float32(nx * correction * wi)
 					s.p.y[i] -= float32(ny * correction * wi)
@@ -134,6 +140,9 @@ func (s *State) dampBridges(dt float32) {
 			_, nx, ny := s.bridgeDirection(i, j)
 			rel := (float64(s.p.vx[j])-float64(s.p.vx[i]))*nx + (float64(s.p.vy[j])-float64(s.p.vy[i]))*ny
 			wi, wj := float64(s.p.invMass[i]), float64(s.p.invMass[j])
+			if wi+wj == 0 {
+				continue
+			}
 			// Backward Euler: impulse = dt * damping * final relative speed.
 			// Accumulating impulses solves that equation across connected links;
 			// repeating passes does not repeatedly apply a full step of damping.

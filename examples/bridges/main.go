@@ -181,19 +181,23 @@ func (g *Game) Update() error {
 	}
 	mx, my := ebiten.CursorPosition()
 	x, y := g.xform.ScreenToUV(mx, my)
-	if x >= g.bounds.MinX && x < g.bounds.MaxX && y >= g.bounds.MinY && y < g.bounds.MaxY {
-		var strength float32
-		if ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft) {
-			strength -= cursorImpulse
+	if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
+		limit := 1
+		if ebiten.IsKeyPressed(ebiten.KeyShift) {
+			limit = 0 // Grab every circle under the pointer.
 		}
-		if ebiten.IsMouseButtonPressed(ebiten.MouseButtonRight) {
-			strength += cursorImpulse
-		}
-		if strength != 0 {
-			g.world.QueueRadialImpulse(softbody.RadialImpulse{
-				X: x, Y: y, Radius: cursorRadius, Strength: strength,
-			})
-		}
+		g.world.Drag(softbody.DragSpec{X: x, Y: y, MaxCircles: limit})
+	}
+	g.world.Carry(x, y)
+	if !ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft) {
+		// Also release if the button was lost while the window lacked focus.
+		g.world.Drop()
+	}
+	if x >= g.bounds.MinX && x < g.bounds.MaxX && y >= g.bounds.MinY && y < g.bounds.MaxY &&
+		ebiten.IsMouseButtonPressed(ebiten.MouseButtonRight) {
+		g.world.QueueRadialImpulse(softbody.RadialImpulse{
+			X: x, Y: y, Radius: cursorRadius, Strength: cursorImpulse,
+		})
 	}
 	g.world.Step(1.0 / ticksPerSecond)
 	g.syncGeometry()
@@ -212,7 +216,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		mode = "border thickness"
 	}
 	ebitenutil.DebugPrint(screen, fmt.Sprintf(
-		"Hold left click: attract nearby circles | Hold right click: repel\nSpace: switch renderer | Current: %s\n%d circles | %d bridges | FPS: %.1f | TPS: %.1f\nTiles: %d | Skipped: %d | Circles clipped: %d",
+		"Left drag: move circle | Shift+left drag: grab all hits | Right click: repel\nSpace: switch renderer | Current: %s\n%d circles | %d bridges | FPS: %.1f | TPS: %.1f\nTiles: %d | Skipped: %d | Circles clipped: %d",
 		mode, g.world.Len(), len(g.bridges), ebiten.ActualFPS(), ebiten.ActualTPS(),
 		stats.TilesDrawn.Load(), stats.TilesSkipped.Load(), stats.CirclesClipped.Load(),
 	))
