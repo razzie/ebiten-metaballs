@@ -1,6 +1,6 @@
 # ebiten-metaballs
 
-`ebiten-metaballs` is a Go package for rendering 2D metaballs with Ebiten v2. Metaballs are defined as circles, with optional bridges between circle pairs. Groups provide independent colors. All circles and bridges are evaluated in one shader pass, with separate fields for each group and smooth contacts between colors.
+`ebiten-metaballs` is a Go package for rendering 2D metaballs with Ebiten v2. Metaballs are defined as circles, with optional bridges between circle pairs and rigid wall segments. Groups provide independent colors. All primitives are evaluated in one shader pass, with separate fields for each group and smooth contacts between colors.
 
 ![Demo GIF](examples/demogif/demo.gif)
 
@@ -38,7 +38,7 @@ Circles and bridges within each group merge through a smooth minimum. After eval
 
 Contacts follow the blended group shapes directly. There is no additional pressure field or nearest-circle lookup. Lighting uses the analytic gradient of the squeezed distance. The blended radius only limits edge thickness; it no longer biases contact placement. Isolated overlapping circles therefore yield by equal depths, and a small circle buried in a deeper competing field can disappear. A large `SmoothK` can also erase small regions through contact rounding.
 
-Primitives are blended in their supplied order without a per-pixel distance cutoff. Smooth-min blending is not associative: reordering three or more primitives can change the shape and lighting even when their positions are unchanged. Keep circle and bridge order stable between frames. The physics example sorts snapshots by stable circle ID before rendering because the simulation reorders its storage by grid cell.
+Primitives are blended in their supplied order without a per-pixel distance cutoff. Smooth-min blending is not associative: reordering three or more primitives can change the shape and lighting even when their positions are unchanged. Keep circle, bridge, and wall order stable between frames. The physics example sorts snapshots by stable circle ID before rendering because the simulation reorders its storage by grid cell.
 
 A primitive farther than `SmoothK` can still affect the contour through intermediate blends; cutting it off introduces notches and lighting jumps. The tiled renderer conservatively pads each group's primitives by `(primitiveCount + 0.5) * SmoothK`, including the contact-rounding margin. Large groups or large `SmoothK` values therefore reduce culling efficiency and may require larger shader tiers. Two equal circles can still have a straight contact, and junctions between three colors can have corners. Switching the nearest competing group preserves distance continuity but can abruptly change the lighting gradient at those junctions. Exactly tied group fields share an empty boundary; completely coincident identical groups cannot remain individually visible.
 
@@ -77,11 +77,24 @@ if err := shader.Draw(dst, groups, xform); err != nil {
 }
 ```
 
+Walls are independent segments in `Group.Walls`:
+
+```go
+group.Walls = []metaballs.Wall{
+    {AX: 0.2, AY: 0.3, BX: 0.8, BY: 0.3, Thickness: 0.04},
+    {AX: 0.2, AY: 0.3, BX: 0.2, BY: 0.8}, // zero-width line
+}
+```
+
+`Thickness` is the full width in UV units, with round ends. Coordinates and thickness must be finite, and thickness must be nonnegative. Coincident endpoints form a disk of radius `Thickness/2`. A group can contain only walls. Zero-width walls have no filled area but still participate in blending and contact; borders do not thicken them.
+
+Walls blend with their own group's circles and bridges. Their original geometry is protected during squeezing, so other groups take the full displacement at a wall instead of sharing it. Walls are two-sided: a circle crossing a segment can appear on both sides. Intersecting walls retain their geometry; the deeper wall owns an overlap, with equal depths favoring the earlier group. These are rendering primitives and do not add collisions to the `softbody` simulation.
+
 `ShaderCapacity` contains compile-time array sizes:
 
 - `Groups` must fit the number of nonempty groups.
-- `Circles` and `Bridges` must fit the **totals across all groups**.
-- `Groups` and `Circles` must be positive; `Bridges` may be zero.
+- `Circles`, `Bridges`, and `Walls` must fit the **totals across all groups**.
+- `Groups` must be positive, and at least one of `Circles` or `Walls` must be positive. Primitive capacities are nonnegative.
 
 These replace the previous `MainCircles`, `OtherCircles`, `MainBridges`, and `OtherBridges` fields. `CapacityForGroups` supplies the new counts automatically. Explicit renderer tiers must use the new total capacities.
 
@@ -132,7 +145,7 @@ err := shader.Draw(dst, groups, xform)
 
 ## Tiled renderer
 
-`Renderer` filters groups against tiles, skips empty tiles, subdivides tiles that exceed a shader tier, and selects the smallest tier whose capacities fit the tile. If a tile still exceeds the largest tier at `MaxDepth`, the renderer draws it with that tier and clips excess circles/groups and bridges whose endpoints were removed. Each drawn tile uses one metaball pass.
+`Renderer` filters groups against tiles, skips empty tiles, subdivides tiles that exceed a shader tier, and selects the smallest tier whose capacities fit the tile. If a tile still exceeds the largest tier at `MaxDepth`, the renderer draws it with that tier and clips excess circles, walls, groups, and bridges whose endpoints were removed. Each drawn tile uses one metaball pass.
 
 ```go
 renderer, err := metaballs.NewRenderer(metaballs.RendererConfig{
@@ -163,7 +176,7 @@ stats, err := renderer.Draw(dst, groups, xform)
 - `MinTileSize`: minimum UV width and height for subdivision.
 - `Debug`: draws tile outlines for skipped, subdivided, and rendered tiles.
 - `Workers`: number of CPU workers for filtering, tile planning and draw calls. Values `0` and `1` are serial.
-- `PoolMaxCircles`, `PoolMaxBridges`, `PoolMaxGroups`: optional initial scratch-pool sizes. Pools grow as needed and never shrink.
+- `PoolMaxCircles`, `PoolMaxBridges`, `PoolMaxWalls`, `PoolMaxGroups`: optional initial scratch-pool sizes. Pools grow as needed and never shrink.
 
 `Draw(dst, groups, xform)` and `DrawAt(dst, groups, xform, offset)` follow the same coordinate rules as `MetaballShader`.
 The visible UV domain comes from the destination bounds minus the scene's pixel offset, mapped through `xform`. Both scale components must be positive.
@@ -191,11 +204,13 @@ go run ./examples/helloworld
 go run ./examples/manycircles
 go run ./examples/demogif
 go run ./examples/bridges
+go run ./examples/walls
 go run ./examples/physics
 ```
 
 - `helloworld` uses `MetaballShader` directly.
 - `manycircles` demonstrates renderer tiling with many moving circles.
 - `demogif` renders moving clustered circles to gif; its captured output is shown above.
+- `walls` compares same-group merging, rigid contact with another group, and zero-width walls. Drag a circle to move it, press Space to pause/resume, or R to reset. Faint outlines show the undeformed circles.
 - `bridges` demonstrates moving clustered circles and bridges.
 - `physics` uses the [softbody package](softbody) for shared circle collisions, damped outer shells, and a hexagonal spatial grid. Hold the left mouse button to attract all red metaballs, middle for greens, and right for blues. Attraction continuously follows the cursor while the button is held. Hold Space to push nearby circles away from the mouse pointer, regardless of group.

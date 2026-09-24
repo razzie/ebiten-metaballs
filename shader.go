@@ -55,6 +55,8 @@ type shaderPools struct {
 	circles     pool.SlicePool[float32]
 	bridgeEnds  pool.SlicePool[float32]
 	bridgeRadii pool.SlicePool[float32]
+	wallEnds    pool.SlicePool[float32]
+	wallData    pool.SlicePool[float32]
 	groupColors pool.SlicePool[float32]
 	uniforms    sync.Pool
 }
@@ -63,6 +65,8 @@ func (p *shaderPools) init(capacity ShaderCapacity) {
 	p.circles.Init(capacity.Circles * 4)
 	p.bridgeEnds.Init(capacity.Bridges * 4)
 	p.bridgeRadii.Init(capacity.Bridges * 4)
+	p.wallEnds.Init(capacity.Walls * 4)
+	p.wallData.Init(capacity.Walls * 2)
 	p.groupColors.Init(capacity.Groups * 4)
 	p.uniforms.New = func() any { return make(map[string]any) }
 }
@@ -83,7 +87,7 @@ func NewMetaballShader(config ShaderConfig) (*MetaballShader, error) {
 	if config.BorderThickness < 0 || math.IsNaN(float64(config.BorderThickness)) || math.IsInf(float64(config.BorderThickness), 0) {
 		return nil, fmt.Errorf("invalid shader config: BorderThickness must be finite and nonnegative: %+v", config)
 	}
-	if config.Groups <= 0 || config.Circles <= 0 || config.Bridges < 0 || config.SmoothK <= 0 {
+	if config.Groups <= 0 || config.Circles < 0 || config.Walls < 0 || (config.Circles == 0 && config.Walls == 0) || config.Bridges < 0 || config.SmoothK <= 0 {
 		return nil, fmt.Errorf("invalid shader config: %+v", config)
 	}
 
@@ -165,6 +169,16 @@ func packBridges(ends, radii []float32, circles []Circle, bridges []Bridge, grou
 // validateGroups also protects the renderer's bridge filtering from bad indices.
 func validateGroups(groups []Group) error {
 	for i, g := range groups {
+		for j, w := range g.Walls {
+			for _, v := range []float32{w.AX, w.AY, w.BX, w.BY, w.Thickness} {
+				if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+					return fmt.Errorf("group %d: wall %d must have finite coordinates and thickness", i, j)
+				}
+			}
+			if w.Thickness < 0 {
+				return fmt.Errorf("group %d: wall %d thickness must be nonnegative", i, j)
+			}
+		}
 		for _, b := range g.Bridges {
 			if b.A < 0 || b.A >= len(g.Circles) || b.B < 0 || b.B >= len(g.Circles) {
 				return fmt.Errorf("group %d: invalid bridge indices: %d -> %d", i, b.A, b.B)
@@ -190,10 +204,10 @@ func (s *MetaballShader) DrawAt(dst *ebiten.Image, groups []Group, xform UVTrans
 		return err
 	}
 	capacity := CapacityForGroups(groups)
-	if capacity.Groups > s.config.Groups || capacity.Circles > s.config.Circles || capacity.Bridges > s.config.Bridges {
-		return fmt.Errorf("metaball counts exceed shader capacity: groups %d/%d, circles %d/%d, bridges %d/%d", capacity.Groups, s.config.Groups, capacity.Circles, s.config.Circles, capacity.Bridges, s.config.Bridges)
+	if capacity.Groups > s.config.Groups || capacity.Circles > s.config.Circles || capacity.Bridges > s.config.Bridges || capacity.Walls > s.config.Walls {
+		return fmt.Errorf("metaball counts exceed shader capacity: groups %d/%d, circles %d/%d, bridges %d/%d, walls %d/%d", capacity.Groups, s.config.Groups, capacity.Circles, s.config.Circles, capacity.Bridges, s.config.Bridges, capacity.Walls, s.config.Walls)
 	}
-	if capacity.Circles == 0 {
+	if capacity.Circles == 0 && capacity.Walls == 0 {
 		return nil
 	}
 	// Map destination-local pixels back to the untranslated scene. Keep the
@@ -228,12 +242,16 @@ func (s *MetaballShader) drawScene(dst *ebiten.Image, groups []Group, capacity S
 	circles := s.pools.circles.Get()
 	ends := s.pools.bridgeEnds.Get()
 	radii := s.pools.bridgeRadii.Get()
+	wallEnds := s.pools.wallEnds.Get()
+	wallData := s.pools.wallData.Get()
+	defer s.pools.wallEnds.Put(wallEnds)
+	defer s.pools.wallData.Put(wallData)
 	colors := s.pools.groupColors.Get()
 	defer s.pools.circles.Put(circles)
 	defer s.pools.bridgeEnds.Put(ends)
 	defer s.pools.bridgeRadii.Put(radii)
 	defer s.pools.groupColors.Put(colors)
-	packGroups(*circles, *ends, *radii, *colors, groups)
+	packGroups(*circles, *ends, *radii, *wallEnds, *wallData, *colors, groups)
 
 	uniforms := s.pools.uniforms.Get().(map[string]any)
 	defer s.pools.uniforms.Put(uniforms)
@@ -241,7 +259,14 @@ func (s *MetaballShader) drawScene(dst *ebiten.Image, groups []Group, capacity S
 	uniforms["UvOffset"] = xform.offset[:]
 	uniforms["PixelOrigin"] = []float32{float32(pixelOrigin.X), float32(pixelOrigin.Y)}
 	uniforms["CircleCount"] = capacity.Circles
-	uniforms["Circles"] = *circles
+	if s.config.Circles > 0 {
+		uniforms["Circles"] = *circles
+	}
+	if s.config.Walls > 0 {
+		uniforms["WallCount"] = capacity.Walls
+		uniforms["WallEnds"] = *wallEnds
+		uniforms["WallData"] = *wallData
+	}
 	uniforms["GroupCount"] = capacity.Groups
 	uniforms["GroupColors"] = *colors
 	if s.config.Bridges > 0 {
@@ -256,14 +281,20 @@ func (s *MetaballShader) drawScene(dst *ebiten.Image, groups []Group, capacity S
 
 // Empty groups do not consume a uniform slot. Every group ID is dense and
 // indexes the color array packed in the same traversal.
-func packGroups(circles, ends, radii, colors []float32, groups []Group) {
-	ci, bi, gi := 0, 0, 0
+func packGroups(circles, ends, radii, wallEnds, wallData, colors []float32, groups []Group) {
+	ci, bi, wi, gi := 0, 0, 0, 0
 	for _, g := range groups {
-		if len(g.Circles) == 0 {
+		if len(g.Circles) == 0 && len(g.Walls) == 0 {
 			continue
 		}
 		packCircles(circles[ci*4:], g.Circles, gi)
 		packBridges(ends[bi*4:], radii[bi*4:], g.Circles, g.Bridges, gi)
+		for j, w := range g.Walls {
+			k := wi + j
+			wallEnds[k*4], wallEnds[k*4+1], wallEnds[k*4+2], wallEnds[k*4+3] = w.AX, w.AY, w.BX, w.BY
+			wallData[k*2], wallData[k*2+1] = w.Thickness/2, float32(gi)
+		}
+		wi += len(g.Walls)
 		colors[gi*4], colors[gi*4+1], colors[gi*4+2], colors[gi*4+3] = g.Color.R(), g.Color.G(), g.Color.B(), g.Color.A()
 		ci += len(g.Circles)
 		bi += len(g.Bridges)

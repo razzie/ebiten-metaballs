@@ -112,7 +112,7 @@ func TestPackGroupsDenseIDsAndLocalBridges(t *testing.T) {
 		{Circles: []Circle{{X: 20, Y: 30, Radius: 6}, {X: 40, Y: 50, Radius: 8}}, Bridges: []Bridge{{A: 0, B: 1, MiddleRadius: 3}}, Color: NewColorScale(0, 0, 1, 0.5)},
 	}
 	circles, ends, radii, colors := make([]float32, 16), make([]float32, 8), make([]float32, 8), make([]float32, 8)
-	packGroups(circles, ends, radii, colors, groups)
+	packGroups(circles, ends, radii, nil, nil, colors, groups)
 	for name, test := range map[string]struct{ got, want []float32 }{
 		"circles": {circles, []float32{1, 2, 4, 0, 7, 8, 10, 0, 20, 30, 6, 1, 40, 50, 8, 1}},
 		"ends":    {ends, []float32{1, 2, 7, 8, 20, 30, 40, 50}},
@@ -165,5 +165,80 @@ func TestMetaballShaderCapacityVariants(t *testing.T) {
 				shader.shader.Deallocate()
 			})
 		}
+	}
+}
+
+func TestWallPackingAndCapacity(t *testing.T) {
+	groups := []Group{{}, {Walls: []Wall{{AX: 1, AY: 2, BX: 3, BY: 4, Thickness: 6}}, Color: NewColorScale(1, 0, 0, 1)}, {}, {Circles: []Circle{{Radius: 2}}, Walls: []Wall{{AX: 7, BX: 8}}, Color: NewColorScale(0, 1, 0, 1)}}
+	if got := CapacityForGroups(groups); got != (ShaderCapacity{Groups: 2, Circles: 1, Walls: 2}) {
+		t.Fatal(got)
+	}
+	circles, ends, data, colors := make([]float32, 4), make([]float32, 8), make([]float32, 4), make([]float32, 8)
+	packGroups(circles, nil, nil, ends, data, colors, groups)
+	if !reflect.DeepEqual(ends, []float32{1, 2, 3, 4, 7, 0, 8, 0}) || !reflect.DeepEqual(data, []float32{3, 0, 0, 1}) || circles[3] != 1 || colors[0] != 1 || colors[5] != 1 {
+		t.Fatalf("bad packed walls: %v %v %v %v", ends, data, circles, colors)
+	}
+}
+
+func TestWallValidationAndShaderVariants(t *testing.T) {
+	for _, wall := range []Wall{{Thickness: -1}, {Thickness: float32(math.NaN())}, {AX: float32(math.Inf(1))}, {BY: float32(math.NaN())}} {
+		if err := validateGroups([]Group{{Walls: []Wall{wall}}}); err == nil {
+			t.Fatalf("accepted %v", wall)
+		}
+	}
+	for _, groups := range []int{1, 3} {
+		for _, circles := range []int{0, 2} {
+			for _, edge := range []bool{false, true} {
+				cfg := ShaderConfig{ShaderCapacity: ShaderCapacity{Groups: groups, Circles: circles, Walls: 3}, ShaderCommonConfig: ShaderCommonConfig{SmoothK: 0.1, BorderThickness: 0.01}}
+				if edge {
+					cfg.LightDirX, cfg.EdgeThickness = 1, 0.02
+				}
+				s, err := NewMetaballShader(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				s.shader.Deallocate()
+			}
+		}
+	}
+	cfg := ShaderConfig{ShaderCapacity: ShaderCapacity{Groups: 1, Circles: 1, Walls: -1}, ShaderCommonConfig: ShaderCommonConfig{SmoothK: 0.1}}
+	if _, err := NewMetaballShader(cfg); err == nil {
+		t.Fatal("accepted negative wall capacity")
+	}
+	cfg.Walls = 1
+	s, err := NewMetaballShader(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.shader.Deallocate()
+	var xf UVTransform
+	xf.SetScale(1, 1)
+	if err := s.Draw(nil, []Group{{Walls: make([]Wall, 2)}}, xf); err == nil {
+		t.Fatal("accepted wall capacity overflow")
+	}
+}
+
+func TestWallTileFilteringAndClipping(t *testing.T) {
+	groups := []Group{{Walls: []Wall{{AX: -1, AY: 0.25, BX: 2, BY: 0.25}, {AX: 2, AY: 2, BX: 3, BY: 3}, {AX: 0.6, AY: 0, BX: 0.6, BY: 1, Thickness: 0.3}}}, {Circles: []Circle{{X: 0.25, Y: 0.25, Radius: 0.1}}}}
+	r := &Renderer{cfg: RendererConfig{Common: ShaderCommonConfig{SmoothK: 0.01}, Tiers: []ShaderCapacity{{Groups: 2, Circles: 1, Walls: 1}, {Groups: 2, Circles: 1, Walls: 3}}}}
+	r.pools.init(2, 1, 0, 3)
+	tile := UVBounds{MinX: 0, MinY: 0, MaxX: 0.5, MaxY: 0.5}
+	prep, any, capacity, release := r.prepareGroupsForTile(groups, tile)
+	defer release()
+	if !any || capacity != (ShaderCapacity{Groups: 2, Circles: 1, Walls: 2}) || r.pickTier(capacity) != 1 {
+		t.Fatalf("bad wall probe: %+v", capacity)
+	}
+	got, releaseGroups := materializeGroupsFromPrep(&r.pools, groups, prep)
+	defer releaseGroups()
+	if len(got) != 2 || !reflect.DeepEqual(got[0].Walls, []Wall{groups[0].Walls[0], groups[0].Walls[2]}) {
+		t.Fatalf("bad wall culling: %+v", got)
+	}
+	clipGroupsToTier(got, ShaderCapacity{Groups: 1, Circles: 1, Walls: 1})
+	if capacity := CapacityForGroups(got); capacity != (ShaderCapacity{Groups: 1, Walls: 1}) {
+		t.Fatalf("bad wall clipping: %+v", capacity)
+	}
+	r.pools.ensure(1, 0, 0, 5)
+	if r.pools.preps.maxCircles != 1 || r.pools.preps.numGroups != 2 || r.pools.preps.maxWalls != 5 {
+		t.Fatal("wall growth shrank other prep dimensions")
 	}
 }

@@ -110,7 +110,7 @@ func initPoolsForGroups(pools *rendererPools, groups []Group) {
 		maxCircles = max(maxCircles, len(groups[i].Circles))
 		maxBridges = max(maxBridges, len(groups[i].Bridges))
 	}
-	pools.init(len(groups), maxCircles, maxBridges)
+	pools.init(len(groups), maxCircles, maxBridges, 0)
 }
 
 // testRenderer builds a bare Renderer for tests that only exercise tile
@@ -165,9 +165,9 @@ func TestSlicePoolZeroLength(t *testing.T) {
 
 func TestRendererPoolsEnsureGrowsButNeverShrinks(t *testing.T) {
 	var p rendererPools
-	p.init(2, 10, 5)
+	p.init(2, 10, 5, 0)
 
-	p.ensure(4, 30, 12)
+	p.ensure(4, 30, 12, 0)
 	if p.groups.N() != 4 || p.preps.numGroups != 4 {
 		t.Errorf("expected group/prep pools grown to 4, got %d / %d", p.groups.N(), p.preps.numGroups)
 	}
@@ -180,7 +180,7 @@ func TestRendererPoolsEnsureGrowsButNeverShrinks(t *testing.T) {
 	}
 
 	// Asking for less must not shrink any pool.
-	p.ensure(1, 5, 2)
+	p.ensure(1, 5, 2, 0)
 	if p.groups.N() != 4 || p.preps.numGroups != 4 {
 		t.Errorf("expected group/prep pools to stay 4, got %d / %d", p.groups.N(), p.preps.numGroups)
 	}
@@ -195,12 +195,12 @@ func TestRendererPoolsEnsureGrowsButNeverShrinks(t *testing.T) {
 
 func TestRendererPoolsEnsureMixedGrowth(t *testing.T) {
 	var p rendererPools
-	p.init(4, 10, 5)
+	p.init(4, 10, 5, 0)
 	groups, preps, bridges := p.groups.N(), p.preps.maxCircles, p.bridges.N()
 
 	// Grow only the circle dimension: group/bridge pools must keep their
 	// existing instances (and thus their already-pooled buffers).
-	p.ensure(4, 20, 5)
+	p.ensure(4, 20, 5, 0)
 	if p.groups.N() != groups {
 		t.Errorf("expected group pool instance to survive circle-only growth")
 	}
@@ -299,7 +299,7 @@ func TestFilterCirclesOverlapMixedLarge(t *testing.T) {
 	}
 
 	var pools rendererPools
-	pools.init(1, n, 0)
+	pools.init(1, n, 0, 0)
 	included := bitset.New(n)
 	found := filterCirclesOverlap(&pools, circles, tile, included, 0)
 	if !found {
@@ -321,7 +321,7 @@ func TestFilterPoolReuseAcrossCalls(t *testing.T) {
 	// One Renderer's pools reused across calls with different-sized groups,
 	// so the small group sub-slices the big group's pooled buffers.
 	r := &Renderer{}
-	r.pools.init(1, 20, 0)
+	r.pools.init(1, 20, 0, 0)
 
 	for range 3 {
 		big := mustGroup(make([]Circle, 20), nil)

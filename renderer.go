@@ -50,15 +50,15 @@ type RendererConfig struct {
 	// filtering and sub-image draw calls run concurrently across workers.
 	Workers int
 
-	// PoolMaxCircles, PoolMaxBridges and PoolMaxGroups optionally hint the
+	// PoolMaxCircles, PoolMaxBridges, PoolMaxWalls and PoolMaxGroups optionally hint the
 	// initial lengths of the Renderer's scratch buffer pools (max circles
-	// per group, max bridges per group, group count). Zero leaves the
+	// per group, max bridges per group, max walls per group, group count). Zero leaves the
 	// default to the largest shader tier's capacities; Draw grows the pools
 	// automatically when actual input exceeds them (they never shrink).
-	PoolMaxCircles, PoolMaxBridges, PoolMaxGroups int
+	PoolMaxCircles, PoolMaxBridges, PoolMaxWalls, PoolMaxGroups int
 }
 
-// Renderer draws large numbers of circles by tiling the canvas, skipping
+// Renderer draws large numbers of primitives by tiling the canvas, skipping
 // empty tiles, adaptively subdividing crowded ones, and picking the
 // smallest shader tier that fits each tile's contents.
 //
@@ -75,34 +75,38 @@ type Renderer struct {
 type materializeBuffers struct {
 	circlesPtr *[]Circle
 	bridgesPtr *[]Bridge
+	wallsPtr   *[]Wall
 }
 
-// groupPrep holds the per-group, per-tile included-circle bitset computed
-// once by prepareGroupsForTile and reused by both tier-picking and
-// materializing, instead of recomputing it in each step. included is nil
-// when the group has no survivors for the tile.
+// groupPrep holds per-group, per-tile circle and wall bitsets computed once
+// by prepareGroupsForTile and reused by tier-picking and materializing.
 type groupPrep struct {
-	included    bitset.BitSet
-	circleCount int
-	bridgeCount int
+	included     bitset.BitSet
+	wallIncluded bitset.BitSet
+	wallCount    int
+	circleCount  int
+	bridgeCount  int
 }
 
 // groupPrepPool recycles slices of groupPrep, initializing each group's
-// included bitset to the pool's maxCircles. This avoids repeated allocation
+// bitsets to the pool's maxCircles and maxWalls. This avoids repeated allocation
 // and bitset initialization on the per-tile filtering hot path.
 type groupPrepPool struct {
 	pool       sync.Pool
 	numGroups  int
 	maxCircles int
+	maxWalls   int
 }
 
-func (p *groupPrepPool) init(numGroups, maxCircles int) {
+func (p *groupPrepPool) init(numGroups, maxCircles, maxWalls int) {
 	p.numGroups = numGroups
 	p.maxCircles = maxCircles
+	p.maxWalls = maxWalls
 	p.pool.New = func() any {
 		s := make([]groupPrep, numGroups)
 		for i := range s {
 			s[i].included.Init(maxCircles)
+			s[i].wallIncluded.Init(maxWalls)
 		}
 		return &s
 	}
@@ -110,10 +114,11 @@ func (p *groupPrepPool) init(numGroups, maxCircles int) {
 
 func (p *groupPrepPool) get() *[]groupPrep {
 	ptr := p.pool.Get().(*[]groupPrep)
-	if cap(*ptr) < p.numGroups || (*ptr)[:1][0].included.Len() < p.maxCircles {
+	if cap(*ptr) < p.numGroups || (*ptr)[:1][0].included.Len() < p.maxCircles || (*ptr)[:1][0].wallIncluded.Len() < p.maxWalls {
 		s := make([]groupPrep, p.numGroups)
 		for i := range s {
 			s[i].included.Init(p.maxCircles)
+			s[i].wallIncluded.Init(p.maxWalls)
 		}
 		ptr = &s
 	}
@@ -124,6 +129,7 @@ func (p *groupPrepPool) get() *[]groupPrep {
 func (p *groupPrepPool) put(ptr *[]groupPrep) {
 	for i := range *ptr {
 		(*ptr)[i].included.Reset()
+		(*ptr)[i].wallIncluded.Reset()
 	}
 	*ptr = (*ptr)[:0]
 	p.pool.Put(ptr)
@@ -138,6 +144,7 @@ type rendererPools struct {
 	ints        pool.SlicePool[int]
 	circles     pool.SlicePool[Circle]
 	bridges     pool.SlicePool[Bridge]
+	walls       pool.SlicePool[Wall]
 	groups      pool.SlicePool[Group]
 	preps       groupPrepPool
 	float32s    pool.SlicePool[float32]
@@ -145,12 +152,13 @@ type rendererPools struct {
 	materialize pool.SlicePool[materializeBuffers]
 }
 
-func (p *rendererPools) init(numGroups, maxCircles, maxBridges int) {
+func (p *rendererPools) init(numGroups, maxCircles, maxBridges, maxWalls int) {
 	p.ints.Init(maxCircles)
 	p.circles.Init(maxCircles)
 	p.bridges.Init(maxBridges)
+	p.walls.Init(maxWalls)
 	p.groups.Init(numGroups)
-	p.preps.init(numGroups, maxCircles)
+	p.preps.init(numGroups, maxCircles, maxWalls)
 	p.float32s.Init(maxCircles)
 	p.int32s.Init(simdLaneCount())
 	p.materialize.Init(numGroups)
@@ -160,7 +168,7 @@ func (p *rendererPools) init(numGroups, maxCircles, maxBridges int) {
 // recreating any pool whose current default is too small. Defaults never
 // shrink. Must be called before the pools are used concurrently (Draw calls
 // it before spawning its workers). Concurrent use is not safe.
-func (p *rendererPools) ensure(numGroups, maxCircles, maxBridges int) {
+func (p *rendererPools) ensure(numGroups, maxCircles, maxBridges, maxWalls int) {
 	if p.ints.N() < maxCircles {
 		p.ints.Init(maxCircles)
 	}
@@ -173,11 +181,14 @@ func (p *rendererPools) ensure(numGroups, maxCircles, maxBridges int) {
 	if p.bridges.N() < maxBridges {
 		p.bridges.Init(maxBridges)
 	}
+	if p.walls.N() < maxWalls {
+		p.walls.Init(maxWalls)
+	}
 	if p.groups.N() < numGroups {
 		p.groups.Init(numGroups)
 	}
-	if p.preps.numGroups < numGroups || p.preps.maxCircles < maxCircles {
-		p.preps.init(numGroups, maxCircles)
+	if p.preps.numGroups < numGroups || p.preps.maxCircles < maxCircles || p.preps.maxWalls < maxWalls {
+		p.preps.init(max(numGroups, p.preps.numGroups), max(maxCircles, p.preps.maxCircles), max(maxWalls, p.preps.maxWalls))
 	}
 	if p.materialize.N() < numGroups {
 		p.materialize.Init(numGroups)
@@ -201,7 +212,7 @@ func NewRenderer(cfg RendererConfig) (*Renderer, error) {
 	for i, tier := range cfg.Tiers {
 		if i > 0 {
 			prev := cfg.Tiers[i-1]
-			if tier.Groups < prev.Groups || tier.Circles < prev.Circles || tier.Bridges < prev.Bridges {
+			if tier.Groups < prev.Groups || tier.Circles < prev.Circles || tier.Bridges < prev.Bridges || tier.Walls < prev.Walls {
 				return nil, fmt.Errorf("renderer tiers must be sorted ascending by capacity: tier %d is smaller than tier %d", i, i-1)
 			}
 		}
@@ -221,13 +232,14 @@ func NewRenderer(cfg RendererConfig) (*Renderer, error) {
 	largest := cfg.Tiers[len(cfg.Tiers)-1]
 	poolMaxCircles := max(cfg.PoolMaxCircles, largest.Circles)
 	poolMaxBridges := max(cfg.PoolMaxBridges, largest.Bridges)
+	poolMaxWalls := max(cfg.PoolMaxWalls, largest.Walls)
 	poolMaxGroups := max(cfg.PoolMaxGroups, largest.Groups)
 
 	r := &Renderer{
 		cfg:     cfg,
 		shaders: shaders,
 	}
-	r.pools.init(poolMaxGroups, poolMaxCircles, poolMaxBridges)
+	r.pools.init(poolMaxGroups, poolMaxCircles, poolMaxBridges, poolMaxWalls)
 
 	if cfg.Common.FxaaEnabled {
 		var fxaaSrc bytes.Buffer
@@ -253,7 +265,7 @@ type Stats struct {
 }
 
 // Draw renders groups by planning a tile grid over dst and drawing only the
-// tiles that contain circles, subdividing crowded tiles as needed.
+// tiles that contain geometry, subdividing crowded tiles as needed.
 func (r *Renderer) Draw(dst *ebiten.Image, groups []Group, xform UVTransform) (*Stats, error) {
 	return r.DrawAt(dst, groups, xform, image.Point{})
 }
@@ -270,12 +282,13 @@ func (r *Renderer) DrawAt(dst *ebiten.Image, groups []Group, xform UVTransform, 
 		return nil, err
 	}
 
-	maxCircles, maxBridges := 0, 0
+	maxCircles, maxBridges, maxWalls := 0, 0, 0
 	for i := range groups {
 		maxCircles = max(maxCircles, len(groups[i].Circles))
 		maxBridges = max(maxBridges, len(groups[i].Bridges))
+		maxWalls = max(maxWalls, len(groups[i].Walls))
 	}
-	if maxCircles == 0 {
+	if maxCircles == 0 && maxWalls == 0 {
 		// Match a direct empty draw: do not composite an empty FXAA buffer.
 		stats := &Stats{}
 		stats.TilesSkipped.Add(int32(r.cfg.RootCols * r.cfg.RootRows))
@@ -285,7 +298,7 @@ func (r *Renderer) DrawAt(dst *ebiten.Image, groups []Group, xform UVTransform, 
 	// Grow the scratch pools (never shrinks) so every pool get below returns
 	// buffers big enough for this frame's groups, before any tile work and
 	// before drawParallel spawns its workers.
-	r.pools.ensure(len(groups), maxCircles, maxBridges)
+	r.pools.ensure(len(groups), maxCircles, maxBridges, maxWalls)
 
 	w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
 
@@ -381,7 +394,7 @@ func (r *Renderer) drawTile(
 	}
 
 	// Cheap counting pass: decides tier/subdivision without materializing
-	// any filtered circle/bridge data, since that's thrown away whenever
+	// any filtered primitive data, since that's thrown away whenever
 	// the tile ends up subdividing instead of drawing.
 	prep, any, cap, prepRelease := r.prepareGroupsForTile(groups, tile)
 
@@ -431,7 +444,7 @@ func (r *Renderer) drawTile(
 	}
 
 	// Now actually drawing this tile (either a tier fit, or a final
-	// fallback): materialize the filtered circle/bridge data from the
+	// fallback): materialize the filtered primitive data from the
 	// bitsets prepareGroupsForTile already computed above.
 	filtered, matRelease := materializeGroupsFromPrep(&r.pools, groups, prep)
 	defer prepRelease()
@@ -464,7 +477,7 @@ func (r *Renderer) drawTile(
 
 func (r *Renderer) pickTier(cap ShaderCapacity) int {
 	for i, tier := range r.cfg.Tiers {
-		if cap.Groups <= tier.Groups && cap.Circles <= tier.Circles && cap.Bridges <= tier.Bridges {
+		if cap.Groups <= tier.Groups && cap.Circles <= tier.Circles && cap.Bridges <= tier.Bridges && cap.Walls <= tier.Walls {
 			return i
 		}
 	}
@@ -572,13 +585,25 @@ func (r *Renderer) prepareGroupsForTile(groups []Group, tile UVBounds) (prep []g
 
 	for i := range groups {
 		g := &groups[i]
-		if len(g.Circles) == 0 {
+		if len(g.Circles) == 0 && len(g.Walls) == 0 {
 			continue
 		}
 
 		included := &p[i].included
 		padding := r.cfg.Common.SmoothK + r.cfg.Common.BorderThickness
-		if !computeIncludedSet(&r.pools, g, tile, included, padding) {
+		hasCircles := computeIncludedSet(&r.pools, g, tile, included, padding)
+		// Wall cuts create an edge inside a circle, so retain their lighting
+		// influence even when EdgeThickness exceeds the blend padding.
+		wallPadding := padding
+		if r.cfg.Common.LightDirX != 0 || r.cfg.Common.LightDirY != 0 {
+			wallPadding += r.cfg.Common.EdgeThickness
+		}
+		for j, w := range g.Walls {
+			if segmentIntersectsRect(w.AX, w.AY, w.BX, w.BY, tile.Padded(w.Thickness/2+wallPadding)) {
+				p[i].wallIncluded.Set(j)
+			}
+		}
+		if !hasCircles && !p[i].wallIncluded.Any() {
 			continue
 		}
 
@@ -592,11 +617,13 @@ func (r *Renderer) prepareGroupsForTile(groups []Group, tile UVBounds) (prep []g
 
 		p[i].circleCount = circleCount
 		p[i].bridgeCount = bridgeCount
+		p[i].wallCount = p[i].wallIncluded.Count()
 
 		any = true
 		cap.Groups++
 		cap.Circles += circleCount
 		cap.Bridges += bridgeCount
+		cap.Walls += p[i].wallCount
 	}
 
 	release = func() {
@@ -642,7 +669,7 @@ func (r *Renderer) materializeGroupsForTile(groups []Group, tile UVBounds) (filt
 }
 
 // materializeGroupsFromPrep builds the actual filtered subset of
-// groups/circles/bridges from bitsets already computed by
+// groups and their primitives from bitsets already computed by
 // prepareGroupsForTile, remapping bridge endpoints accordingly. All
 // backing storage comes from pools; the caller must invoke the returned
 // release func (typically via defer) once it's done using the result, e.g.
@@ -658,15 +685,24 @@ func materializeGroupsFromPrep(pools *rendererPools, groups []Group, prep []grou
 	defer pools.ints.Put(remapPtr)
 
 	for i := range groups {
-		if !prep[i].included.Any() {
+		if !prep[i].included.Any() && !prep[i].wallIncluded.Any() {
 			continue
 		}
 
 		buffers := materializeBuffers{
 			circlesPtr: pools.circles.Get(),
 			bridgesPtr: pools.bridges.Get(),
+			wallsPtr:   pools.walls.Get(),
 		}
 		filteredGroup := materializeGroupFromIncluded(remapPtr, buffers.circlesPtr, buffers.bridgesPtr, &groups[i], &prep[i].included)
+		walls := (*buffers.wallsPtr)[:0]
+		for j, w := range groups[i].Walls {
+			if prep[i].wallIncluded.Has(j) {
+				walls = append(walls, w)
+			}
+		}
+		*buffers.wallsPtr = walls
+		filteredGroup.Walls = walls
 		*groupsPtr = append(*groupsPtr, filteredGroup)
 		*materializeBuffersPtr = append(*materializeBuffersPtr, buffers)
 	}
@@ -675,6 +711,7 @@ func materializeGroupsFromPrep(pools *rendererPools, groups []Group, prep []grou
 		for _, r := range *materializeBuffersPtr {
 			pools.circles.Put(r.circlesPtr)
 			pools.bridges.Put(r.bridgesPtr)
+			pools.walls.Put(r.wallsPtr)
 		}
 		pools.groups.Put(groupsPtr)
 		pools.materialize.Put(materializeBuffersPtr)
@@ -716,19 +753,23 @@ func materializeGroupFromIncluded(remapPtr *[]int, circlesPtr *[]Circle, bridges
 // whose endpoint circles were dropped are removed as well.
 func clipGroupsToTier(groups []Group, tier ShaderCapacity) int {
 	dropped := 0
-	remainingCircles, remainingBridges, remainingGroups := tier.Circles, tier.Bridges, tier.Groups
+	remainingCircles, remainingBridges, remainingWalls, remainingGroups := tier.Circles, tier.Bridges, tier.Walls, tier.Groups
 	for i := range groups {
 		g := &groups[i]
-		circleCap := remainingCircles
+		circleCap, wallCap := remainingCircles, remainingWalls
 		if remainingGroups == 0 {
-			circleCap = 0
+			circleCap, wallCap = 0, 0
 		}
 		if len(g.Circles) > circleCap {
 			dropped += len(g.Circles) - circleCap
 			g.Circles = g.Circles[:circleCap]
 		}
 		remainingCircles -= len(g.Circles)
-		if len(g.Circles) > 0 {
+		if len(g.Walls) > wallCap {
+			g.Walls = g.Walls[:wallCap]
+		}
+		remainingWalls -= len(g.Walls)
+		if len(g.Circles) > 0 || len(g.Walls) > 0 {
 			remainingGroups--
 		}
 		bridges := g.Bridges[:0]

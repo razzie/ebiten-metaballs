@@ -47,8 +47,10 @@ func (g *drawAtTestGame) Update() error {
 	probe.ReadPixels(make([]byte, 4))
 	probe.Deallocate()
 
+	g.t.Run("wall lighting and reuse", checkWallLightingAndReuse)
 	for _, edge := range []bool{false, true} {
 		for _, fxaa := range []bool{false, true} {
+			g.t.Run(fmt.Sprintf("walls/edge=%t/fxaa=%t", edge, fxaa), func(t *testing.T) { checkWallPixels(t, edge, fxaa) })
 			g.t.Run(fmt.Sprintf("borders and joints/edge=%t/fxaa=%t", edge, fxaa), func(t *testing.T) {
 				checkBorderPixels(t, edge, fxaa)
 			})
@@ -73,6 +75,130 @@ func (g *drawAtTestGame) Update() error {
 		}
 	}
 	return ebiten.Termination
+}
+
+// Runs inside the existing graphics test loop, covering both shader variants
+// and checking the tiled renderer against the direct shader pixel for pixel.
+func checkWallPixels(t *testing.T, edge, fxaa bool) {
+	cfg := ShaderCommonConfig{SmoothK: 16, FxaaEnabled: fxaa}
+	if edge {
+		cfg.LightDirX, cfg.LightDirY, cfg.EdgeThickness = -1, -1, 8
+	}
+	wall := Group{Walls: []Wall{{AX: 128.5, AY: 32.5, BX: 128.5, BY: 224.5, Thickness: 16}}, Color: NewColorScale(0, 1, 0, 1)}
+	circle := Group{Circles: []Circle{{X: 138.5, Y: 128.5, Radius: 64}}, Color: NewColorScale(1, 0, 0, 1)}
+	pixel := func(p []byte, x, y int) []byte { return p[4*(y*256+x) : 4*(y*256+x)+4] }
+	for _, border := range []float32{0, 3} {
+		cfg.BorderThickness = border
+		for _, scene := range [][]Group{{wall}, {wall, circle}, {circle, wall}} {
+			direct := renderBorderPixels(t, scene, cfg, false)
+			if got := renderBorderPixels(t, scene, cfg, true); !bytes.Equal(got, direct) {
+				t.Fatal("wall tiling differs from direct rendering")
+			}
+			for _, x := range []int{122, 128, 134} {
+				p := pixel(direct, x, 128)
+				if p[1] == 0 || p[0] != 0 || p[3] != 255 {
+					t.Fatalf("wall squeezed or overwritten at %d: %v", x, p)
+				}
+			}
+			if len(scene) > 1 && pixel(direct, 148, 128)[0] == 0 {
+				t.Fatal("foreign circle disappeared outside wall")
+			}
+		}
+	}
+	cfg.BorderThickness = 0
+	wall.Circles = []Circle{{X: 154.5, Y: 128.5, Radius: 12}}
+	merged := renderBorderPixels(t, []Group{wall}, cfg, false)
+	if pixel(merged, 140, 128)[1] == 0 {
+		t.Fatal("same-group wall and circle did not blend across gap")
+	}
+	if got := renderBorderPixels(t, []Group{wall}, cfg, true); !bytes.Equal(got, merged) {
+		t.Fatal("wall blend differs across tiles")
+	}
+	wall.Circles = nil
+	wall.Walls[0].Thickness = 0
+	line := renderBorderPixels(t, []Group{wall}, cfg, false)
+	if !bytes.Equal(line, make([]byte, len(line))) {
+		t.Fatal("zero-width wall gained filled area")
+	}
+	if !fxaa {
+		cut := renderBorderPixels(t, []Group{wall, circle}, cfg, false)
+		if pixel(cut, 128, 128)[3] != 0 || pixel(cut, 132, 128)[0] == 0 {
+			t.Fatal("zero-width wall did not cut foreign circle at its centerline")
+		}
+	}
+	// Each wall group excludes only foreign walls, even at an intersection.
+	wall.Walls[0].Thickness = 16
+	crossing := Group{Walls: []Wall{{AX: 32.5, AY: 128.5, BX: 224.5, BY: 128.5, Thickness: 16}}, Color: NewColorScale(0, 0, 1, 1)}
+	scene := []Group{wall, crossing, circle}
+	cross := renderBorderPixels(t, scene, cfg, false)
+	if pixel(cross, 128, 160)[1] == 0 || pixel(cross, 160, 128)[2] == 0 || pixel(cross, 128, 128)[1] == 0 {
+		t.Fatal("foreign wall groups lost their rigid geometry or stable tie ownership")
+	}
+	if got := renderBorderPixels(t, scene, cfg, true); !bytes.Equal(got, cross) {
+		t.Fatal("intersecting wall groups differ across tiles")
+	}
+	// A zero-length thick wall is a rigid disk, including wall-only scenes.
+	wall.Walls[0] = Wall{AX: 128.5, AY: 128.5, BX: 128.5, BY: 128.5, Thickness: 32}
+	disk := renderBorderPixels(t, []Group{wall, circle}, cfg, false)
+	if pixel(disk, 128, 128)[1] == 0 || pixel(disk, 138, 128)[1] == 0 {
+		t.Fatal("degenerate wall lost its rigid disk")
+	}
+}
+
+func checkWallLightingAndReuse(t *testing.T) {
+	cfg := ShaderCommonConfig{SmoothK: 2, LightDirX: -1, EdgeThickness: 48, BorderThickness: 4}
+	wall := Group{Walls: []Wall{{AX: 60.5, AY: 0, BX: 60.5, BY: 256, Thickness: 16}}, Color: NewColorScale(0, 1, 0, 1)}
+	circle := Group{Circles: []Circle{{X: 128.5, Y: 128.5, Radius: 80}}, Color: NewColorScale(1, 0, 0, 1)}
+	direct := renderBorderPixels(t, []Group{wall, circle}, cfg, false)
+	if got := renderBorderPixels(t, []Group{wall, circle}, cfg, true); !bytes.Equal(got, direct) {
+		t.Fatal("tile culling lost the wide lighting band of a wall cut")
+	}
+	// The new edge facing the wall lights the circle more brightly than its
+	// original surface, well outside the blend radius.
+	without := renderBorderPixels(t, []Group{circle}, cfg, false)
+	i := 4 * (128*256 + 90)
+	if direct[i] <= without[i]+10 {
+		t.Fatalf("wall contact lighting ended at blend radius: with=%v without=%v", direct[i:i+4], without[i:i+4])
+	}
+
+	capacity := ShaderCapacity{Groups: 3, Circles: 2, Walls: 3}
+	s, err := NewMetaballShader(ShaderConfig{ShaderCapacity: capacity, ShaderCommonConfig: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.shader.Deallocate()
+	r, err := NewRenderer(RendererConfig{Common: cfg, Tiers: []ShaderCapacity{capacity}, RootCols: 4, RootRows: 4, MinTileSize: 1, Workers: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.shaders[0].shader.Deallocate()
+	dst := ebiten.NewImage(256, 256)
+	defer dst.Deallocate()
+	var xf UVTransform
+	xf.SetScale(1, 1)
+	pixels := make([]byte, 256*256*4)
+	for _, scene := range [][]Group{{wall, circle}, {circle}, {{}, wall}, {circle, wall}, {}} {
+		want := make([]byte, len(pixels))
+		if len(scene) > 0 {
+			want = renderBorderPixels(t, scene, cfg, false)
+		}
+		dst.Clear()
+		if err := s.Draw(dst, scene, xf); err != nil {
+			t.Fatal(err)
+		}
+		dst.ReadPixels(pixels)
+		if !bytes.Equal(pixels, want) {
+			t.Fatal("shader retained stale wall uniforms or changed a circle-only scene")
+		}
+		dst.Clear()
+		if _, err := r.Draw(dst, scene, xf); err != nil {
+			t.Fatal(err)
+		}
+		dst.ReadPixels(pixels)
+		if !bytes.Equal(pixels, want) {
+			t.Fatal("parallel renderer retained stale wall geometry")
+		}
+	}
 }
 
 // Called inside the existing GPU test game loop.

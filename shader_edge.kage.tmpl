@@ -54,6 +54,22 @@ func sdSplineCapsuleField(p vec2, ends, radii vec4) vec4 {
 }
 {{end}}
 
+{{if gt .Walls 0}}
+func sdWallField(p vec2, ends vec4, radius float) vec4 {
+	ba := ends.zw-ends.xy
+	pa := p-ends.xy
+	t := clamp(dot(pa, ba)/max(dot(ba, ba), 1e-12), 0.0, 1.0)
+	q := pa-ba*t
+	// Keep zero-width lines present without giving them a visible radius.
+	return vec4(q*inversesqrt(max(dot(q, q), 1e-12)), length(q)-radius, max(radius, 1e-6))
+}
+
+func excludeWallField(main, wall vec4, k float) vec4 {
+	h := clamp(0.5+0.5*(-wall.z-main.z)/k, 0.0, 1.0)
+	return vec4(mix(main.xy, -wall.xy, h), mix(main.z, -wall.z, h)+k*h*(1.0-h), main.w)
+}
+{{end}}
+
 // Subtract a smooth minimum of the nearest competing GROUP distance and zero.
 // Competitors are never smooth-unioned together, so extra colors do not inflate
 // the opposing field. The transition rounds the exposed ends of a contact.

@@ -10,9 +10,10 @@ import (
 type ShaderCapacity struct {
 	// Groups is the number of nonempty groups in one draw.
 	Groups int
-	// Circles and Bridges are totals across all groups in one draw.
+	// Circles, Bridges and Walls are totals across all groups in one draw.
 	Circles int
 	Bridges int
+	Walls   int
 }
 
 // ShaderCommonConfig holds the common configuration parameters for a shader,
@@ -60,12 +61,22 @@ type Bridge struct {
 	MiddleRadius float32
 }
 
-// Group blends its circles, then bridges, in slice order. Smooth-min blending
-// is not associative: keep primitive order stable between frames to avoid
+// Wall is a rigid, two-sided segment with round ends. Thickness is its full
+// width in UV units and must be finite and nonnegative. Zero gives a line
+// with no filled area. Coincident endpoints give a disk of radius Thickness/2.
+// Walls blend with their own group but retain their shape during squeezing.
+type Wall struct {
+	AX, AY, BX, BY float32
+	Thickness      float32
+}
+
+// Group blends its circles, then bridges, then walls, in slice order.
+// Smooth-min blending is not associative: keep primitive order stable between frames to avoid
 // abrupt changes to the shape and lighting.
 type Group struct {
 	Circles []Circle
 	Bridges []Bridge
+	Walls   []Wall
 	Color   ebiten.ColorScale
 }
 
@@ -83,11 +94,12 @@ func NewColorScale(r, g, b, a float32) ebiten.ColorScale {
 func CapacityForGroups(groups []Group) ShaderCapacity {
 	var capacity ShaderCapacity
 	for _, g := range groups {
-		if len(g.Circles) > 0 || len(g.Bridges) > 0 {
+		if len(g.Circles) > 0 || len(g.Bridges) > 0 || len(g.Walls) > 0 {
 			capacity.Groups++
 		}
 		capacity.Circles += len(g.Circles)
 		capacity.Bridges += len(g.Bridges)
+		capacity.Walls += len(g.Walls)
 	}
 	return capacity
 }
