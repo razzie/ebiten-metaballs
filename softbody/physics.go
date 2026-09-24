@@ -98,6 +98,10 @@ func (s *State) solveCell(cid int, impulses []RadialImpulse) {
 		cx += we
 		cy += wf
 
+		pa, pb := s.polygonShellResponse(i, cid)
+		ax += pa
+		ay += pb
+
 		ca, cb := s.radialImpulseResponse(i, impulses)
 		dvx += ca
 		dvy += cb
@@ -174,7 +178,23 @@ func (s *State) integrate(dt float32) {
 		dampingStep = s.cfg.LinearDamping * dt
 		massDampingStep = dampingStep * s.cfg.LinearDampingMassFactor
 	}
+	if len(s.polygons) > 0 {
+		s.polygonStartX = append(s.polygonStartX[:0], s.p.x...)
+		s.polygonStartY = append(s.polygonStartY[:0], s.p.y...)
+	}
 	integrateKernel(&s.p, s.ax, s.ay, s.dvx, s.dvy, s.corrX, s.corrY, dt, dampingStep, massDampingStep, s.cfg.Restitution, s.bounds, s.cfg.Workers)
+	if len(s.polygons) > 0 {
+		parallelFor(s.p.len(), s.cfg.Workers, 512, func(start, end int) {
+			for i := start; i < end; i++ {
+				if s.p.invMass[i] == 0 {
+					continue
+				}
+				x, y := s.p.x[i], s.p.y[i]
+				s.p.x[i], s.p.y[i] = s.polygonStartX[i], s.polygonStartY[i]
+				s.movePolygonCore(i, x, y)
+			}
+		})
+	}
 }
 
 func pairScalar(p *particleData, i, j int, cfg Config) (ax, ay, dvx, dvy, cx, cy float32) {

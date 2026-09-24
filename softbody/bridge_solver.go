@@ -41,16 +41,14 @@ func (s *State) solveBridgeConstraints(dt float32) {
 				dyi := float32(ny * correction * float64(s.p.invMass[i]))
 				dxj := float32(nx * correction * float64(s.p.invMass[j]))
 				dyj := float32(ny * correction * float64(s.p.invMass[j]))
-				s.p.x[i] += dxi
-				s.p.y[i] += dyi
-				s.p.x[j] -= dxj
-				s.p.y[j] -= dyj
 				// Feed the constraint displacement back into velocity. Without
 				// this the endpoints would keep trying to stretch every step.
 				s.p.vx[i] += dxi / dt
 				s.p.vy[i] += dyi / dt
 				s.p.vx[j] -= dxj / dt
 				s.p.vy[j] -= dyj / dt
+				s.movePolygonCore(i, s.p.x[i]+dxi, s.p.y[i]+dyi)
+				s.movePolygonCore(j, s.p.x[j]-dxj, s.p.y[j]-dyj)
 			}
 			// A bridge can pull its endpoints into a wall or another circle.
 			// Rebuild the broad phase after moving them, then resolve cores.
@@ -71,6 +69,7 @@ func (s *State) confineBridgeParticles() {
 	for i, radius := range s.p.inner {
 		s.p.x[i], s.p.vx[i] = confine(s.p.x[i], s.p.vx[i], s.bounds.MinX+radius, s.bounds.MaxX-radius, s.cfg.Restitution)
 		s.p.y[i], s.p.vy[i] = confine(s.p.y[i], s.p.vy[i], s.bounds.MinY+radius, s.bounds.MaxY-radius, s.cfg.Restitution)
+		s.projectPolygonCore(i)
 	}
 }
 
@@ -106,10 +105,8 @@ func (s *State) projectBridgeContacts() {
 						continue
 					}
 					correction := (inner - d) * float64(s.cfg.CoreCorrection) / (wi + wj)
-					s.p.x[i] -= float32(nx * correction * wi)
-					s.p.y[i] -= float32(ny * correction * wi)
-					s.p.x[j] += float32(nx * correction * wj)
-					s.p.y[j] += float32(ny * correction * wj)
+					s.movePolygonCore(i, s.p.x[i]-float32(nx*correction*wi), s.p.y[i]-float32(ny*correction*wi))
+					s.movePolygonCore(j, s.p.x[j]+float32(nx*correction*wj), s.p.y[j]+float32(ny*correction*wj))
 					rel := (float64(s.p.vx[j])-float64(s.p.vx[i]))*nx + (float64(s.p.vy[j])-float64(s.p.vy[i]))*ny
 					if rel < 0 {
 						impulse := -(1 + float64(s.cfg.Restitution)) * rel / (wi + wj)

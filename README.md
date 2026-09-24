@@ -205,6 +205,7 @@ go run ./examples/manycircles
 go run ./examples/demogif
 go run ./examples/bridges
 go run ./examples/walls
+go run ./examples/polygons
 go run ./examples/physics
 ```
 
@@ -212,5 +213,43 @@ go run ./examples/physics
 - `manycircles` demonstrates renderer tiling with many moving circles.
 - `demogif` renders moving clustered circles to gif; its captured output is shown above.
 - `walls` compares same-group merging, rigid contact with another group, and zero-width walls. Drag a circle to move it, press Space to pause/resume, or R to reset. Faint outlines show the undeformed circles.
+- `polygons` draws solid convex and concave polygons with Ebiten, converts their boundaries into zero-width shader walls in a separate transparent group, and registers the same polygons with `softbody` for collisions. A gentle pull feeds soft circles through a narrow funnel. Left drag grabs a circle, right hold attracts, Space repels, D shows shells/cores, and R resets. Polygon fills are drawn over the metaballs because shader walls are two-sided boundaries rather than solid interiors.
 - `bridges` demonstrates moving clustered circles and bridges.
 - `physics` uses the [softbody package](softbody) for shared circle collisions, damped outer shells, and a hexagonal spatial grid. Hold the left mouse button to attract all red metaballs, middle for greens, and right for blues. Attraction continuously follows the cursor while the button is held. Hold Space to push nearby circles away from the mouse pointer, regardless of group.
+
+The `softbody` world also supports immovable solid polygons:
+
+```go
+obstacleID, err := world.AddPolygon([]softbody.Point{
+    {X: 0.3, Y: 0.3},
+    {X: 0.7, Y: 0.3},
+    {X: 0.7, Y: 0.4},
+    {X: 0.4, Y: 0.4},
+    {X: 0.4, Y: 0.7},
+    {X: 0.3, Y: 0.7},
+})
+if err != nil {
+    return err
+}
+// world.RemovePolygon(obstacleID) removes the obstacle later.
+_ = obstacleID
+```
+
+Vertices follow the boundary in either winding order; the last connects to the
+first. Convex and concave simple polygons are supported, including the L shape
+above. Self-intersections, holes, zero-length edges, and zero-area polygons are
+not supported. Input vertices and `PolygonSnapshot` results are copied.
+
+Outer shells compress against polygons using the existing shell stiffness and
+damping settings. Inner cores collide with restitution. Swept collision checks
+prevent fast movement, bridge corrections, and `Drag`/`Carry`/`Drop` from crossing
+solid obstacles; blocked movement slides along their boundaries. This also
+applies when `Drop` consumes a pending `Carry` without an intervening `Step`.
+Polygon candidates are cached per hex cell for shell contacts; movement uses
+swept bounding boxes so it can cross many cells safely.
+
+Adding a polygon or circle resolves initial overlaps toward free space. Leave
+enough room for cores between obstacles and world bounds; incompatible geometry
+cannot be fully resolved. Polygon mutations run on the simulation goroutine.
+Polygons provide physics geometry only; use `PolygonSnapshot` to draw them in
+your application.

@@ -70,6 +70,7 @@ func (s *State) SetBounds(b Bounds) error {
 	for i, radius := range s.p.inner {
 		s.p.x[i], s.p.vx[i] = confine(s.p.x[i], s.p.vx[i], b.MinX+radius, b.MaxX-radius, s.cfg.Restitution)
 		s.p.y[i], s.p.vy[i] = confine(s.p.y[i], s.p.vy[i], b.MinY+radius, b.MaxY-radius, s.cfg.Restitution)
+		s.projectPolygonCore(i)
 	}
 	return nil
 }
@@ -108,6 +109,7 @@ func (s *State) AddCircle(c CircleSpec) (uint64, error) {
 		s.maxOuter = c.OuterRadius
 		s.geometryDirty = true
 	}
+	s.projectPolygonCore(i)
 	return id, nil
 }
 

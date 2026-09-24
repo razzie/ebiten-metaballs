@@ -58,8 +58,9 @@ func (s *State) Drag(spec DragSpec) []uint64 {
 
 // Carry registers the latest pointer position in world coordinates. The next
 // positive Step moves the selection there over its substeps, preserving grab
-// offsets and clamping each core to the world bounds. Held circles push other
-// circles and pull bridge neighbors but cannot be moved by physics themselves.
+// offsets and clamping each core to the world bounds and polygon obstacles.
+// Held circles push other circles and pull bridge neighbors but cannot be moved
+// by physics themselves.
 // It is harmless without a selection; nonfinite coordinates are ignored.
 func (s *State) Carry(x, y float32) {
 	if len(s.dragged) > 0 && finitePointer(x, y) {
@@ -77,7 +78,8 @@ func (s *State) Drop() {
 	s.indexBridges()
 	for _, c := range s.dragged {
 		i := s.bridgeIndex[c.id]
-		s.p.x[i], s.p.y[i] = s.dragTarget(c, i)
+		x, y := s.dragTarget(c, i)
+		s.movePolygonCore(i, x, y)
 		s.p.vx[i], s.p.vy[i] = 0, 0
 		s.p.invMass[i] = c.invMass
 	}
@@ -106,7 +108,8 @@ func (s *State) carrySubstep(dt float32, remaining int) {
 		x, y := s.dragTarget(c, i)
 		x = s.p.x[i] + (x-s.p.x[i])/float32(remaining)
 		y = s.p.y[i] + (y-s.p.y[i])/float32(remaining)
-		s.p.vx[i], s.p.vy[i] = (x-s.p.x[i])/dt, (y-s.p.y[i])/dt
-		s.p.x[i], s.p.y[i] = x, y
+		oldX, oldY := s.p.x[i], s.p.y[i]
+		s.movePolygonCore(i, x, y)
+		s.p.vx[i], s.p.vy[i] = (s.p.x[i]-oldX)/dt, (s.p.y[i]-oldY)/dt
 	}
 }

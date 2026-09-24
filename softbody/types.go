@@ -189,6 +189,10 @@ type State struct {
 	bridgeIndex          []int
 	bridgeDampingImpulse []float64
 
+	polygons                     []polygon
+	nextPolygonID                uint64
+	polygonStartX, polygonStartY []float32
+
 	maxOuter      float32
 	geometryDirty bool
 	grid          hexGrid

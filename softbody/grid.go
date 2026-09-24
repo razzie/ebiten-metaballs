@@ -26,11 +26,12 @@ type hexGrid struct {
 	qCount     int
 	rCount     int
 
-	cells   []cell
-	counts  []int
-	cursor  []int
-	active  []int
-	stencil []axialOffset
+	polygons [][]int
+	cells    []cell
+	counts   []int
+	cursor   []int
+	active   []int
+	stencil  []axialOffset
 }
 
 func (g *hexGrid) index(q, r int) int {
@@ -98,6 +99,22 @@ func (s *State) ensureGridGeometry() {
 		}
 	}
 
+	// Cache whole polygon candidates per hex cell, including polygon interiors.
+	// The circumradius and largest shell make this conservative at cell corners.
+	g.polygons = nil
+	if len(s.polygons) > 0 {
+		g.polygons = make([][]int, nCells)
+		for cid := range g.cells {
+			q, r := g.coord(cid)
+			x, y := float64(spacing)*(float64(q)+float64(r)/2), float64(rowH)*float64(r)
+			padding := float64(s.maxOuter + circumradius)
+			for k := range s.polygons {
+				if s.polygons[k].near(x, y, x, y, padding) {
+					g.polygons[cid] = append(g.polygons[cid], k)
+				}
+			}
+		}
+	}
 	s.geometryDirty = false
 }
 
