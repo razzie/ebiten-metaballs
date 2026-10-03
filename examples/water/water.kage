@@ -1,0 +1,92 @@
+//kage:unit pixels
+
+package main
+
+var Time float
+var GeometryK float
+var View int
+
+// The pool floor is procedural, so the example needs only the geometry texture.
+func caustics(p vec2) float {
+	q := p * 0.035
+	a := sin(q.x + sin(q.y+Time*0.4))
+	b := sin(q.y*1.17 + cos(q.x-Time*0.3))
+	return pow(1.0-abs(a*b), 12.0)
+}
+
+func floorColor(p vec2) vec3 {
+	tile := abs(fract(p/64.0) - 0.5)
+	grout := smoothstep(0.468, 0.493, max(tile.x, tile.y))
+	stone := 0.5 + 0.5*sin(p.x*0.014)*cos(p.y*0.017)
+	base := mix(vec3(0.028, 0.065, 0.09), vec3(0.055, 0.12, 0.15), stone)
+	base *= 1.0 - grout*0.65
+	base += vec3(0.025, 0.075, 0.085) * caustics(p)
+	return base
+}
+
+func Fragment(dstPos vec4, srcPos vec2) vec4 {
+	p := dstPos.xy - imageDstOrigin()
+	data := imageSrc0At(srcPos)
+	background := floorColor(p)
+	if data.w == 0.0 {
+		// Offset sampling casts a soft-looking shadow onto the pool floor.
+		shadow := imageSrc0At(srcPos - vec2(12.0, 18.0)).w
+		return vec4(background*(1.0-shadow*0.55), 1.0)
+	}
+
+	// Match ShaderCommonConfig.GeometryBuffer's RGBA8 encoding. Radius is
+	// data, not opacity, and signed gradients retain their original magnitude.
+	e := data.xy*2.0 - 1.0
+	gradient := e / max(vec2(1.0)-abs(e), vec2(1.0/255.0))
+	distance := -GeometryK * data.z / max(1.0-data.z, 1.0/255.0)
+	radius := GeometryK * data.w / max(1.0-data.w, 1.0/255.0)
+	if View == 1 {
+		return vec4(0.5+gradient*0.25, 0.5, 1.0)
+	}
+	if View == 2 {
+		return vec4(vec3(clamp(-distance/100.0, 0.0, 1.0)), 1.0)
+	}
+	if View == 3 {
+		return vec4(vec3(0.1, 0.65, 0.95)*clamp(radius/100.0, 0.0, 1.0), 1.0)
+	}
+
+	gradLen := length(gradient)
+	depth := -distance / max(gradLen, 0.25)
+	// A rounded water surface, flattening where opposing gradients cancel.
+	direction := gradient / max(gradLen, 0.01)
+	shoulder := clamp(1.0-depth/max(radius, 1.0), 0.0, 1.0)
+	shoulder *= smoothstep(0.05, 0.5, gradLen)
+	wave := vec2(
+		cos(p.x*0.036+p.y*0.019+Time*1.4),
+		sin(p.y*0.041-p.x*0.015-Time*1.1),
+	)
+	nxy := direction*shoulder*0.92 + wave*0.085*(1.0-shoulder)
+	normal := normalize(vec3(nxy, sqrt(max(1.0-dot(nxy, nxy), 0.02))))
+
+	// Refract the patterned floor and absorb red light as thickness increases.
+	refracted := floorColor(p + normal.xy*(18.0+depth*0.22) + wave*5.0)
+	absorption := exp(-depth * vec3(0.035, 0.012, 0.007))
+	water := refracted * absorption * 2.5
+	water += vec3(0.015, 0.30, 0.38) * (1.0 - absorption) * 0.65
+	water += vec3(0.04, 0.22, 0.23) * caustics(p+normal.xy*32.0) * smoothstep(2.0, 18.0, depth)
+
+	// Fresnel reflection and two broad light panels give a glassy moving rim.
+	fresnel := 0.035 + 0.75*pow(1.0-normal.z, 3.0)
+	reflection := mix(vec3(0.06, 0.20, 0.27), vec3(0.55, 0.90, 1.0), 0.5+0.5*normal.y)
+	panel := pow(0.5+0.5*sin(normal.x*10.0+normal.y*6.0+0.4), 24.0)
+	reflection += vec3(0.4, 0.65, 0.7) * panel
+	water = mix(water, reflection, fresnel)
+	halfway := normalize(vec3(-0.45, -0.6, 1.6))
+	specular := pow(max(dot(normal, halfway), 0.0), 100.0)
+	water += vec3(0.8, 0.95, 1.0) * specular * 0.85
+
+	// A broken foam line follows the actual squeezed distance contour.
+	foamNoise := 0.5 + 0.5*sin(p.x*0.19+sin(p.y*0.16)+Time*1.7)
+	foam := (1.0 - smoothstep(0.5, 3.5+foamNoise*2.5, depth)) * (0.35 + 0.4*foamNoise)
+	water = mix(water, vec3(0.72, 0.96, 0.97), foam)
+	// Antialias only the final color pass; never filter the geometry texture.
+	coverage := smoothstep(0.0, 1.25, depth)
+	color := mix(background, water, coverage)
+	vignette := 1.0 - 0.25*dot((p-imageSrc0Size()*0.5)/imageSrc0Size(), (p-imageSrc0Size()*0.5)/imageSrc0Size())
+	return vec4(color*vignette, 1.0)
+}
