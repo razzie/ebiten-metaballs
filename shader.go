@@ -84,6 +84,9 @@ type MetaballShader struct {
 }
 
 func NewMetaballShader(config ShaderConfig) (*MetaballShader, error) {
+	if config.GeometryBuffer && config.FxaaEnabled {
+		return nil, fmt.Errorf("invalid shader config: GeometryBuffer is incompatible with FXAA")
+	}
 	if config.BorderThickness < 0 || math.IsNaN(float64(config.BorderThickness)) || math.IsInf(float64(config.BorderThickness), 0) {
 		return nil, fmt.Errorf("invalid shader config: BorderThickness must be finite and nonnegative: %+v", config)
 	}
@@ -93,7 +96,7 @@ func NewMetaballShader(config ShaderConfig) (*MetaballShader, error) {
 
 	data := config
 
-	if length := math.Hypot(float64(config.LightDirX), float64(config.LightDirY)); length > 0 {
+	if length := math.Hypot(float64(config.LightDirX), float64(config.LightDirY)); !config.GeometryBuffer && length > 0 {
 		data.LightDirX = float32(float64(config.LightDirX) / length)
 		data.LightDirY = float32(float64(config.LightDirY) / length)
 
@@ -268,7 +271,9 @@ func (s *MetaballShader) drawScene(dst *ebiten.Image, groups []Group, capacity S
 		uniforms["WallData"] = *wallData
 	}
 	uniforms["GroupCount"] = capacity.Groups
-	uniforms["GroupColors"] = *colors
+	if !s.config.GeometryBuffer {
+		uniforms["GroupColors"] = *colors
+	}
 	if s.config.Bridges > 0 {
 		uniforms["BridgeCount"] = capacity.Bridges
 		uniforms["BridgeEnds"] = *ends
@@ -276,7 +281,11 @@ func (s *MetaballShader) drawScene(dst *ebiten.Image, groups []Group, capacity S
 	}
 	var transform ebiten.GeoM
 	transform.Translate(float64(dst.Bounds().Min.X), float64(dst.Bounds().Min.Y))
-	dst.DrawRectShader(dst.Bounds().Dx(), dst.Bounds().Dy(), s.shader, &ebiten.DrawRectShaderOptions{GeoM: transform, Uniforms: uniforms})
+	opts := &ebiten.DrawRectShaderOptions{GeoM: transform, Uniforms: uniforms}
+	if s.config.GeometryBuffer {
+		opts.Blend = ebiten.BlendCopy
+	}
+	dst.DrawRectShader(dst.Bounds().Dx(), dst.Bounds().Dy(), s.shader, opts)
 }
 
 // Empty groups do not consume a uniform slot. Every group ID is dense and

@@ -242,3 +242,43 @@ func TestWallTileFilteringAndClipping(t *testing.T) {
 		t.Fatal("wall growth shrank other prep dimensions")
 	}
 }
+
+func TestGeometryBufferShaderVariants(t *testing.T) {
+	for _, capacity := range []ShaderCapacity{
+		{Groups: 1, Circles: 2},
+		{Groups: 3, Circles: 2, Bridges: 1},
+		{Groups: 1, Walls: 2},
+		{Groups: 3, Circles: 2, Bridges: 1, Walls: 2},
+	} {
+		for _, border := range []float32{0, 0.01} {
+			cfg := ShaderConfig{ShaderCapacity: capacity, ShaderCommonConfig: ShaderCommonConfig{
+				SmoothK: 0.1, GeometryBuffer: true, BorderThickness: border,
+				// Lighting is ignored in geometry mode, including EdgeThickness validation.
+				LightDirX: -1, LightDirY: -1,
+			}}
+			t.Run(fmt.Sprintf("%+v/border=%g", capacity, border), func(t *testing.T) {
+				s, err := NewMetaballShader(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				s.shader.Deallocate()
+			})
+		}
+	}
+}
+
+func TestGeometryBufferRejectsPostProcessing(t *testing.T) {
+	common := ShaderCommonConfig{SmoothK: 0.1, GeometryBuffer: true, FxaaEnabled: true}
+	capacity := ShaderCapacity{Groups: 1, Circles: 1}
+	if _, err := NewMetaballShader(ShaderConfig{ShaderCapacity: capacity, ShaderCommonConfig: common}); err == nil || !strings.Contains(err.Error(), "FXAA") {
+		t.Fatalf("expected incompatible FXAA error, got %v", err)
+	}
+	cfg := RendererConfig{Common: common, Tiers: []ShaderCapacity{capacity}, RootCols: 2, RootRows: 2, MinTileSize: 0.01}
+	if _, err := NewRenderer(cfg); err == nil || !strings.Contains(err.Error(), "FXAA") {
+		t.Fatalf("renderer: expected incompatible FXAA error, got %v", err)
+	}
+	cfg.Common.FxaaEnabled, cfg.Debug = false, true
+	if _, err := NewRenderer(cfg); err == nil || !strings.Contains(err.Error(), "debug") {
+		t.Fatalf("expected incompatible debug overlay error, got %v", err)
+	}
+}

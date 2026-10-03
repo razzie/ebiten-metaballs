@@ -103,6 +103,7 @@ These replace the previous `MainCircles`, `OtherCircles`, `MainBridges`, and `Ot
 `ShaderCommonConfig` is shared by all generated shader tiers:
 
 - `SmoothK` controls shape blending and contact rounding. It must be positive.
+- `GeometryBuffer` outputs encoded geometry for a custom shader pass (see below). FXAA must be disabled.
 - `LightDirX` and `LightDirY` select the edge-light direction. `(0, 0)` disables edge shading.
 - `EdgeThickness` must be positive when edge shading is enabled.
 - `BorderThickness` adds an inset border in UV units, using 35% of the group color's RGB and preserving its alpha. It must be finite and nonnegative; zero preserves the original style. Borders work with or without lighting, and lighting follows the inset fill's edge. Circle radii include the border; bridge endpoint radii are clamped to at least the border thickness, while `MiddleRadius` is preserved.
@@ -129,6 +130,42 @@ group := metaballs.Group{
 }
 // Use SmoothK: 0.03 and BorderThickness: 0.012 in ShaderCommonConfig.
 ```
+
+### Geometry buffer
+
+Set `ShaderCommonConfig.GeometryBuffer: true` on a shader or tiled renderer to output the final field after group squeezing and rigid-wall contacts: **xy = gradient, z = distance, w = blended radius**. Group colors, edge lighting, and inset border coloring are skipped. Border-related joint and bridge geometry still applies. The gradient retains its magnitude through blends and contacts; normalize it only when you need a surface normal.
+
+Ebitengine images use 8-bit channels in `[0, 1]`, so signed gradients and UV-space lengths are encoded rather than written raw. With `k = SmoothK`, the stored channels are:
+
+| Channels | Encoding |
+| --- | --- |
+| xy | `0.5 + 0.5 * gradient / (1 + abs(gradient))` |
+| z | `-distance / (k - distance)` |
+| w | `radius / (k + radius)` |
+
+Only pixels inside the final silhouette are written (distance < 0). Clear the geometry image each frame; a cleared pixel with `w == 0` has no geometry. Geometry draws use `ebiten.BlendCopy`, preserving the radius channel independently of opacity. Sample the image directly in a Kage shader, without alpha unpremultiplication or texture filtering, and decode it using the same `SmoothK`:
+
+```go
+data := imageSrc0At(srcPos)
+if data.w == 0.0 {
+    // No geometry here.
+    return vec4(0.0)
+}
+e := data.xy*2.0 - 1.0
+gradient := e / max(vec2(1.0)-abs(e), vec2(1.0/255.0))
+distance := -SmoothK*data.z / max(1.0-data.z, 1.0/255.0)
+radius := SmoothK*data.w / max(1.0-data.w, 1.0/255.0)
+```
+
+Lengths are in the scene's UV units, including when UV units are pixels. RGBA8 quantization limits precision, especially for lengths much larger than `SmoothK` or very small radii. Constructors reject geometry mode combined with FXAA; renderer debug overlays are also rejected because they overwrite data. Apply any color antialiasing in the consuming shader or after that pass.
+
+The [water example](examples/water) renders this buffer and uses a custom shader for refracted pool tiles, animated caustics and ripples, Fresnel reflections, specular highlights, and shoreline foam:
+
+```sh
+go run ./examples/water
+```
+
+Drag droplets to reshape the water, press Space to pause, G to inspect the gradient/distance/radius channels, and R to reset.
 
 ### UV scaling
 

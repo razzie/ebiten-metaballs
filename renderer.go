@@ -197,6 +197,9 @@ func (p *rendererPools) ensure(numGroups, maxCircles, maxBridges, maxWalls int) 
 
 // NewRenderer validates cfg and eagerly compiles one shader per tier.
 func NewRenderer(cfg RendererConfig) (*Renderer, error) {
+	if cfg.Common.GeometryBuffer && cfg.Debug {
+		return nil, fmt.Errorf("renderer debug overlays are incompatible with GeometryBuffer")
+	}
 	if len(cfg.Tiers) == 0 {
 		return nil, fmt.Errorf("renderer config must have at least one tier")
 	}

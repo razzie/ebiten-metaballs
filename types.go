@@ -17,10 +17,26 @@ type ShaderCapacity struct {
 }
 
 // ShaderCommonConfig holds the common configuration parameters for a shader,
-// including smooth-min blending radius, edge shading, and FXAA settings.
+// including smooth-min blending radius, geometry output, edge shading, and FXAA settings.
 type ShaderCommonConfig struct {
 	// SmoothK controls shape blending and contact rounding. Must be positive.
 	SmoothK float32
+	// GeometryBuffer writes the final geometry instead of shaded group colors.
+	// Only interior pixels are written; clear dst before each frame. Lighting
+	// and inset border coloring are skipped, but border joint geometry is retained.
+	// FXAA is incompatible with this mode. Renderer debug overlays must be disabled.
+	//
+	// Ebitengine images store 8-bit channels in [0, 1], so the field is encoded:
+	// xy = 0.5 + 0.5 * gradient / (1 + abs(gradient)),
+	// z = -distance / (SmoothK - distance),
+	// w = radius / (SmoothK + radius).
+	// In a consuming shader, let e = 2*sample.xy - 1 and decode with
+	// gradient = e / (1 - abs(e)), distance = -SmoothK*sample.z/(1-sample.z),
+	// radius = SmoothK*sample.w/(1-sample.w). Guard denominators against zero
+	// after quantization. A cleared pixel (w == 0) has no geometry.
+	// The gradient retains its magnitude; it is not a normalized surface normal.
+	// Draw uses BlendCopy because w stores radius rather than opacity.
+	GeometryBuffer bool
 	// Lighting direction for edge shading, normalized to unit length. (0, 0) disables edge shading.
 	LightDirX, LightDirY float32
 	// Edge thickness for the edge shading. Needs light direction to be non-zero. Must be positive.

@@ -48,6 +48,7 @@ func (g *drawAtTestGame) Update() error {
 	probe.Deallocate()
 
 	g.t.Run("wall lighting and reuse", checkWallLightingAndReuse)
+	g.t.Run("geometry buffer", checkGeometryBufferPixels)
 	for _, edge := range []bool{false, true} {
 		for _, fxaa := range []bool{false, true} {
 			g.t.Run(fmt.Sprintf("walls/edge=%t/fxaa=%t", edge, fxaa), func(t *testing.T) { checkWallPixels(t, edge, fxaa) })
@@ -75,6 +76,91 @@ func (g *drawAtTestGame) Update() error {
 		}
 	}
 	return ebiten.Termination
+}
+
+// Called within the graphics test loop. Test actual channel storage and decoding,
+// since source checks cannot catch signed-channel clipping or alpha blending.
+func checkGeometryBufferPixels(t *testing.T) {
+	cfg := ShaderCommonConfig{SmoothK: 16, GeometryBuffer: true}
+	for _, test := range []struct {
+		name   string
+		groups []Group
+		point  image.Point
+		field  [4]float64
+	}{
+		{"circle right", []Group{{Circles: []Circle{{X: 128.5, Y: 128.5, Radius: 32}}}}, image.Pt(144, 128), [4]float64{1, 0, -16, 32}},
+		{"circle left", []Group{{Circles: []Circle{{X: 128.5, Y: 128.5, Radius: 32}}}}, image.Pt(112, 128), [4]float64{-1, 0, -16, 32}},
+		{"circle center", []Group{{Circles: []Circle{{X: 128.5, Y: 128.5, Radius: 32}}}}, image.Pt(128, 128), [4]float64{0, 0, -32, 32}},
+		{"blend", []Group{{Circles: []Circle{{X: 112.5, Y: 128.5, Radius: 32}, {X: 144.5, Y: 128.5, Radius: 48}}}}, image.Pt(128, 144), [4]float64{-math.Sqrt(0.5), math.Sqrt(0.5), math.Sqrt(512) - 48, 48}},
+		{"gradient cancellation", []Group{{Circles: []Circle{{X: 112.5, Y: 128.5, Radius: 32}, {X: 144.5, Y: 128.5, Radius: 32}}}}, image.Pt(128, 128), [4]float64{0, 0, -20, 32}},
+		{"blended radius", []Group{{Circles: []Circle{{X: 108.5, Y: 128.5, Radius: 32}, {X: 172.5, Y: 128.5, Radius: 48}}}}, image.Pt(128, 128), [4]float64{0.5, 0, -13, 36}},
+		{"wall", []Group{{Walls: []Wall{{AX: 64.5, AY: 128.5, BX: 192.5, BY: 128.5, Thickness: 32}}}}, image.Pt(128, 136), [4]float64{0, 1, -8, 16}},
+		{"bridge radius sweep", []Group{{Circles: []Circle{{X: 16.5, Y: 128.5, Radius: 16}, {X: 240.5, Y: 128.5, Radius: 16}}, Bridges: []Bridge{{A: 0, B: 1, MiddleRadius: 32}}}}, image.Pt(72, 136), [4]float64{-9.0 / 28, 1, -12, 20}},
+		// The two circles have opposing gradients, so contact squeezing creates
+		// a gradient of magnitude 1.5. Encoding must preserve that magnitude.
+		{"squeezed contact", []Group{{Circles: []Circle{{X: 108.5, Y: 128.5, Radius: 32}}}, {Circles: []Circle{{X: 160.5, Y: 128.5, Radius: 32}}}}, image.Pt(128, 128), [4]float64{1.5, 0, -10, 32}},
+		{"foreign wall", []Group{{Circles: []Circle{{X: 160.5, Y: 128.5, Radius: 64}}}, {Walls: []Wall{{AX: 128.5, AY: 64.5, BX: 128.5, BY: 192.5, Thickness: 16}}}}, image.Pt(140, 128), [4]float64{-1, 0, -4, 64}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			direct := renderBorderPixels(t, test.groups, cfg, false)
+			if tiled := renderBorderPixels(t, test.groups, cfg, true); !bytes.Equal(direct, tiled) {
+				t.Fatal("tiled geometry differs from direct geometry")
+			}
+			index := 4 * (test.point.Y*256 + test.point.X)
+			p := direct[index : index+4]
+			var field [4]float64
+			for i := 0; i < 2; i++ {
+				e := float64(p[i])*2/255 - 1
+				field[i] = e / (1 - math.Abs(e))
+			}
+			field[2] = -float64(cfg.SmoothK) * float64(p[2]) / (255 - float64(p[2]))
+			field[3] = float64(cfg.SmoothK) * float64(p[3]) / (255 - float64(p[3]))
+			for i, want := range test.field {
+				tolerance := 0.03
+				if i >= 2 {
+					tolerance = 0.6 // RGBA8 length quantization at these radii/depths.
+				}
+				if math.Abs(field[i]-want) > tolerance {
+					t.Fatalf("channel %d: decoded %g, want %g (stored %v)", i, field[i], want, p)
+				}
+			}
+			if !bytes.Equal(direct[:4], []byte{0, 0, 0, 0}) {
+				t.Fatal("outside geometry was written")
+			}
+			// Group opacity and lighting/border coloring must not change stored geometry.
+			for i := range test.groups {
+				test.groups[i].Color = NewColorScale(1, 0.2, 0.5, 0.2)
+			}
+			styled := cfg
+			styled.LightDirX, styled.BorderThickness = -1, 2
+			if got := renderBorderPixels(t, test.groups, styled, false); !bytes.Equal(direct, got) {
+				t.Fatal("group color, lighting, or inset border changed geometry")
+			}
+		})
+	}
+
+	// Copy blending must replace existing data, even when radius/alpha is small.
+	dst := ebiten.NewImage(256, 256)
+	defer dst.Deallocate()
+	scene := []Group{{Circles: []Circle{{X: 128.5, Y: 128.5, Radius: 32}}}}
+	s, err := NewMetaballShader(ShaderConfig{ShaderCapacity: CapacityForGroups(scene), ShaderCommonConfig: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.shader.Deallocate()
+	var xf UVTransform
+	xf.SetScale(1, 1)
+	want := renderBorderPixels(t, scene, cfg, false)
+	for range 2 {
+		if err := s.Draw(dst, scene, xf); err != nil {
+			t.Fatal(err)
+		}
+		got := make([]byte, len(want))
+		dst.ReadPixels(got)
+		if !bytes.Equal(got, want) {
+			t.Fatal("repeated geometry draws blended with existing data")
+		}
+	}
 }
 
 // Runs inside the existing graphics test loop, covering both shader variants

@@ -7,14 +7,14 @@ const MaxGroups = {{.Groups}}
 {{if gt .Circles 0}}const MaxCircles = {{.Circles}}{{end}}
 {{if gt .Walls 0}}const MaxWalls = {{.Walls}}{{end}}
 {{if gt .Bridges 0}}const MaxBridges = {{.Bridges}}{{end}}
-{{if or .LightDirX .LightDirY}}const EdgeThickness = {{float .EdgeThickness}}{{end}}
+{{if and (not .GeometryBuffer) (or .LightDirX .LightDirY)}}const EdgeThickness = {{float .EdgeThickness}}{{end}}
 {{if .BorderThickness}}const BorderThickness = {{float .BorderThickness}}{{end}}
 
 var UvScale vec2
 var UvOffset vec2
 var PixelOrigin vec2
 var GroupCount int
-var GroupColors [MaxGroups]vec4
+{{if not .GeometryBuffer}}var GroupColors [MaxGroups]vec4{{end}}
 var CircleCount int
 // xy = center, z = radius, w = group ID
 {{if gt .Circles 0}}var Circles [MaxCircles]vec4{{end}}
@@ -33,9 +33,9 @@ var BridgeRadii [MaxBridges]vec4
 
 // Field values: xy = distance gradient, z = distance, w = blended radius.
 // A zero radius marks an empty group. Basic rendering leaves xy unassigned.
-{{if or .LightDirX .LightDirY}}
+{{if or .GeometryBuffer .LightDirX .LightDirY}}
 {{template "edge.fields" .}}
-{{template "edge.lighting" .}}
+{{if not .GeometryBuffer}}{{template "edge.lighting" .}}{{end}}
 {{else}}
 {{template "basic.fields" .}}
 {{template "basic.lighting" .}}
@@ -110,7 +110,7 @@ func Fragment(dstPos vec4) vec4 {
 	}
 	{{end}}
 
-	selected := 0
+	{{if or (not .GeometryBuffer) (and (gt .Groups 1) (gt .Walls 0))}}selected := 0{{end}}
 	{{if eq .Groups 1}}
 	// A single-group shader needs no ownership scan or contact squeezing.
 	squeezed := fields[0]
@@ -133,7 +133,7 @@ func Fragment(dstPos vec4) vec4 {
 		if field.z < main.z {
 			other = main
 			main = field
-			selected = g
+			{{if or (not .GeometryBuffer) (gt .Walls 0)}}selected = g{{end}}
 		} else if field.z < other.z {
 			other = field
 		}
@@ -195,7 +195,7 @@ func Fragment(dstPos vec4) vec4 {
 		}
 		if candidate.z < squeezed.z {
 			squeezed = candidate
-			selected = g
+			{{if not .GeometryBuffer}}selected = g{{end}}
 		}
 	}
 	{{else}}
@@ -205,6 +205,12 @@ func Fragment(dstPos vec4) vec4 {
 	if squeezed.z >= 0.0 {
 		discard()
 	}
+	{{if .GeometryBuffer}}
+	// Pack signed gradients and UV-space lengths into an RGBA8 data texture.
+	// Rational encoding preserves gradients larger than one (e.g. squeezing)
+	// and supports pixel-sized UV units without clipping distances or radii.
+	return vec4(0.5+0.5*squeezed.xy/(1.0+abs(squeezed.xy)), -squeezed.z/(SmoothK-squeezed.z), squeezed.w/(SmoothK+squeezed.w))
+	{{else}}
 	color := GroupColors[selected]
 	{{if .BorderThickness}}
 	// Apply the border after contact squeezing so boundaries between groups
@@ -218,4 +224,5 @@ func Fragment(dstPos vec4) vec4 {
 	{{end}}
 	factor := edge(squeezed)
 	return vec4(color.rgb*factor, color.a)
+	{{end}}
 }
