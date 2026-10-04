@@ -28,8 +28,6 @@ const (
 	maxRadius            = 0.025
 	bridgeRadius         = minRadius / 4
 
-	cursorRadius    = 0.35
-	cursorImpulse   = 1.0 / ticksPerSecond
 	smoothK         = 0.015
 	edgeThickness   = 0.03
 	borderThickness = 0.006
@@ -48,6 +46,7 @@ type Game struct {
 	snapshot       []softbody.CircleSnapshot
 	bridges        []softbody.BridgeSnapshot
 	circleIndices  map[uint64]circleLocation
+	anchored       map[uint64]bool
 	xform          metaballs.UVTransform
 	bounds         metaballs.UVBounds
 }
@@ -118,6 +117,7 @@ func NewGame() (*Game, error) {
 		xform:         xform,
 		bounds:        bounds,
 		circleIndices: make(map[uint64]circleLocation, world.Len()),
+		anchored:      make(map[uint64]bool),
 		groups: []metaballs.Group{
 			{Color: metaballs.NewColorScale(1, 0.2, 0.2, 1)},
 			{Color: metaballs.NewColorScale(0.2, 0.4, 1, 1)},
@@ -194,10 +194,21 @@ func (g *Game) Update() error {
 		g.world.Drop()
 	}
 	if x >= g.bounds.MinX && x < g.bounds.MaxX && y >= g.bounds.MinY && y < g.bounds.MaxY &&
-		ebiten.IsMouseButtonPressed(ebiten.MouseButtonRight) {
-		g.world.QueueRadialImpulse(softbody.RadialImpulse{
-			X: x, Y: y, Radius: cursorRadius, Strength: cursorImpulse,
-		})
+		inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonRight) {
+		if ids := g.world.CirclesAt(x, y); len(ids) > 0 {
+			id := ids[0]
+			if g.anchored[id] {
+				g.world.ReleaseCircle(id)
+				delete(g.anchored, id)
+			} else {
+				location := g.circleIndices[id]
+				circle := g.groups[location.group].Circles[location.index]
+				if err := g.world.AnchorCircle(id, circle.X, circle.Y); err != nil {
+					return fmt.Errorf("anchor circle: %w", err)
+				}
+				g.anchored[id] = true
+			}
+		}
 	}
 	g.world.Step(1.0 / ticksPerSecond)
 	g.syncGeometry()
@@ -216,7 +227,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		mode = "border thickness"
 	}
 	ebitenutil.DebugPrint(screen, fmt.Sprintf(
-		"Left drag: move circle | Shift+left drag: grab all hits | Right click: repel\nSpace: switch renderer | Current: %s\n%d circles | %d bridges | FPS: %.1f | TPS: %.1f\nTiles: %d | Skipped: %d | Circles clipped: %d",
+		"Left drag: move circle | Shift+left drag: grab all hits | Right click: anchor/release circle\nSpace: switch renderer | Current: %s\n%d circles | %d bridges | FPS: %.1f | TPS: %.1f\nTiles: %d | Skipped: %d | Circles clipped: %d",
 		mode, g.world.Len(), len(g.bridges), ebiten.ActualFPS(), ebiten.ActualTPS(),
 		stats.TilesDrawn.Load(), stats.TilesSkipped.Load(), stats.CirclesClipped.Load(),
 	))

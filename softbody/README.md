@@ -310,7 +310,7 @@ limits cannot be satisfied. As usual, substeps are discrete, so very fast pointe
 motion can pass through circles between collision checks.
 
 The bridges example uses left drag for one circle, Shift+left drag for all hits,
-and right click for repulsion.
+and right click to anchor or release the nearest circle under the pointer.
 
 ## External impulses
 
