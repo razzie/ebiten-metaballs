@@ -128,6 +128,12 @@ type Config struct {
 	// More passes improve load propagation through long chains.
 	BridgeIterations int
 
+	// GravityX and GravityY are uniform accelerations in world units per second
+	// squared, independent of circle mass and group. Zero disables gravity.
+	// Applied each substep before velocity damping; anchored and dragged circles
+	// are unaffected. Positive GravityY points down with screen coordinates.
+	GravityX, GravityY float32
+
 	ShellStiffness float32
 	ShellDamping   float32
 	Restitution    float32

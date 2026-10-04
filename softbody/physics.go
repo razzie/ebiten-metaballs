@@ -46,7 +46,8 @@ func (s *State) solveCell(cid int, impulses []RadialImpulse) {
 	cq, cr := s.grid.coord(cid)
 
 	for i := own.start; i < own.end; i++ {
-		var ax, ay, dvx, dvy, cx, cy float32
+		ax, ay := s.cfg.GravityX, s.cfg.GravityY
+		var dvx, dvy, cx, cy float32
 
 		for _, off := range s.grid.stencil {
 			nid := s.grid.index(cq+off.q, cr+off.r)

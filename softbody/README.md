@@ -20,6 +20,22 @@ The outer shells use a nonlinear spring-damper response. The inner cores use
 position correction plus a normal collision impulse, so the simulation does not
 have to rely on an arbitrarily stiff penalty spring to prevent collapse.
 
+`Config.GravityX` and `Config.GravityY` set uniform acceleration in world units
+per second squared, independent of circle mass and group. Both default to zero.
+Gravity is applied every substep before velocity damping, alongside collision
+and bridge forces. Anchored and dragged circles are unaffected; gravity resumes
+when they are released. It uses the existing particle loop without an extra
+pass or allocations.
+
+```go
+cfg := softbody.DefaultConfig()
+cfg.GravityY = 1 // Downward acceleration with screen coordinates.
+world := softbody.New(cfg)
+world.Step(1.0 / 60.0)
+```
+
+Choose the acceleration for your world scale; the default world is one unit tall.
+
 `Config.LinearDamping` sets the base velocity damping rate.
 `Config.LinearDampingMassFactor` defaults to zero, giving every circle the same
 damping. Positive values increase the rate with mass:
