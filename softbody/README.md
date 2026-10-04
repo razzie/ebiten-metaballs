@@ -240,6 +240,28 @@ therefore overlap an anchor until it is released. `BoundaryRemove` still deletes
 outside anchored circles and their bridges. `ShiftOrigin` transforms anchored
 coordinates with the rest of the world, preserving their physical positions.
 
+## Point queries
+
+Find entities at a point without changing the simulation or drag selection:
+
+```go
+circleIDs := world.CirclesAt(x, y)
+polygonIDs := world.PolygonsAt(x, y)
+```
+
+Both methods take world coordinates and return all matching stable IDs in a
+caller-owned slice. `CirclesAt` tests outer disks, including their boundaries,
+and orders hits by distance to the center, then by ID. Anchored and dragged
+circles are included. `PolygonsAt` tests solid interiors, edges, and vertices
+of convex or concave polygons in either winding order; hits are ordered by ID.
+Circle and polygon IDs are separate namespaces. Bridges have no collision
+geometry and are not queried.
+
+A miss or nonfinite coordinates return `nil`. Queries use current positions,
+including immediately after additions, translations, or origin shifts, without
+requiring a step. Call them on the simulation goroutine, like `Snapshot`.
+For pointer input, convert screen coordinates using `UVTransform.ScreenToUV`.
+
 ## Drag and drop
 
 Use three separate calls on the simulation goroutine, with pointer positions in
