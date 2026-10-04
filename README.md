@@ -298,6 +298,8 @@ The optional `softbody` package provides 2D circle physics for interactive metab
 
 Create a world with `softbody.New`, add circles with `AddCircle`, advance the simulation with `Step`, and read their positions with `Snapshot` for rendering. The package is independent of the renderer; your application chooses colors and input controls. Drag-and-drop and radial impulses support grabbing, attracting, and repelling circles.
 
+`AnchorCircle(id, x, y)` fixes a circle at a position until `ReleaseCircle(id)` restores its original mass at rest. Anchored circles resist physics and dragging, and snapshots expose their `Anchored` status. See [anchoring](softbody/README.md#anchoring).
+
 `SetBounds` changes the world rectangle, with `BoundaryWalls` confinement by default or `BoundaryRemove` to delete circles leaving it and their attached bridges. `TranslateCircles` and `TranslatePolygons` reposition bodies, while `ShiftOrigin` rebases the entire simulation, including bounds and pending input. See [scrolling and boundary behavior](softbody/README.md#scrolling-translation-and-boundaries).
 
 Render each snapshot circle with its `OuterRadius`. Snapshot order can change between steps, so sort by stable circle ID to keep rendering order consistent. Physics bridges use stable circle IDs; rendering bridges use slice indices. Map IDs to the current group's circle indices when converting `BridgeSnapshot` results, as the bridges example does.

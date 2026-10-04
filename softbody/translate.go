@@ -2,9 +2,9 @@ package softbody
 
 import "fmt"
 
-// TranslateCircles adds (dx, dy) to all circles, including held circles and their
-// drag target. IDs, velocities, masses, radii, and bridges are preserved unless
-// BoundaryRemove deletes an outside center and its incident bridges. Bounds,
+// TranslateCircles adds (dx, dy) to unanchored circles, including held circles and
+// their drag target. IDs, velocities, masses, radii, and bridges are preserved
+// unless BoundaryRemove deletes an outside center and its incident bridges. Bounds,
 // polygons, and queued impulse sources stay fixed. The movement is a teleport,
 // not a sweep. Translations into polygon cores or outside wall confinement are
 // rejected without mutation. Call on the simulation goroutine.
@@ -16,6 +16,9 @@ func (s *State) TranslateCircles(dx, dy float32) error {
 		return nil
 	}
 	for i := range s.p.x {
+		if s.isAnchored(i) {
+			continue
+		}
 		x, y := s.p.x[i]+dx, s.p.y[i]+dy
 		if !finitePointer(x, y) {
 			return fmt.Errorf("translated circle coordinates must be finite")
@@ -43,6 +46,9 @@ func (s *State) TranslateCircles(dx, dy float32) error {
 		return fmt.Errorf("translated drag target must be finite")
 	}
 	for i := range s.p.x {
+		if s.isAnchored(i) {
+			continue
+		}
 		s.p.x[i] += dx
 		s.p.y[i] += dy
 	}
@@ -56,7 +62,7 @@ func (s *State) TranslateCircles(dx, dy float32) error {
 
 // TranslatePolygons adds (dx, dy) to all polygon vertices, preserving polygon
 // IDs. Invalid or rounded-degenerate geometry is rejected without mutation.
-// Existing circle penetrations are immediately recovered, as with AddPolygon;
+// Existing unanchored circle penetrations are recovered, as with AddPolygon;
 // this can move circles and reflect their velocities. BoundaryRemove deletes
 // wholly outside polygon boxes and any circles pushed outside. Bounds, drag
 // targets, and impulse sources stay fixed. This repositions static geometry;

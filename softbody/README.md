@@ -4,7 +4,8 @@ A rendering-independent 2D circle physics state with rectangular world bounds,
 defaulting to `[0,1] x [0,1]`. Call `SetBounds` on the simulation goroutine to
 extend, shrink, or move the world rectangle; `Bounds()` returns it. The default
 `BoundaryWalls` mode immediately confines existing hard cores and requires the
-largest circle to fit. `BoundaryRemove` instead deletes circles whose centers
+largest circle to fit. Anchored circles keep their positions when walls change.
+`BoundaryRemove` instead deletes circles whose centers
 leave the rectangle, including their incident bridges and drag selections.
 The hex grid rebuilds on the next step. All bounds must be finite and have
 finite positive dimensions.
@@ -72,14 +73,14 @@ addition also rejects obstacle recovery that puts its center outside. Removed
 IDs are never reused, and removed bridge endpoints cannot be connected again.
 Even a bridge with `BreakDistance: 0` is deleted when an endpoint is removed.
 
-`TranslateCircles(dx, dy)` adds the displacement to all circles, including held
+`TranslateCircles(dx, dy)` adds the displacement to unanchored circles, including held
 circles and their pending drag target, preserving velocities and IDs. It leaves
 bounds, polygons, and queued impulses fixed. It rejects polygon-core overlaps
 and cores outside walls atomically; in removal mode, outside centers are
 deleted instead. Movement is a teleport and does not sweep intervening terrain.
 
 `TranslatePolygons(dx, dy)` adds the displacement to all obstacle vertices and
-updates collision caches. It immediately recovers circle penetrations, which
+updates collision caches. It immediately recovers unanchored circle penetrations, which
 can move circles and reflect velocities. Removal mode also deletes outside
 polygon boxes and circles pushed outside. This repositions static geometry;
 it does not provide moving-platform velocity or sweep the polygons' movement.
@@ -207,6 +208,38 @@ range. They have no collision geometry and do not interact with other bridges,
 circles along their length, or walls. Endpoint circles retain their ordinary
 collisions. Rendering bridges is the caller's responsibility.
 
+## Anchoring
+
+Fix a circle at a position using its stable ID:
+
+```go
+if err := world.AnchorCircle(circleID, x, y); err != nil {
+    panic(err)
+}
+// Later, restore its original mass and let physics move it again.
+released := world.ReleaseCircle(circleID)
+_ = released // False if the circle was not anchored or has been removed.
+```
+
+Anchoring teleports the circle to the exact target and clears its velocity.
+The target must be finite, inside the world (with the core fitting in wall mode),
+and clear of polygon cores. Invalid requests leave the state unchanged.
+Repeating an anchor at the same position is harmless; release it before choosing
+a different position. `CircleSnapshot.Anchored` reports its anchor status.
+Both methods run on the simulation goroutine.
+
+Anchored circles cannot be moved by collisions, attraction, impulses, bridges,
+dragging, or `TranslateCircles`. Other circles still collide with them and
+respond to their bridges. Anchoring a held circle removes just that circle from
+the drag selection and preserves its original mass for release. Release clears
+velocity; impulses applied while anchored are consumed without accumulating.
+
+Anchors take precedence over bridge limits, wall confinement after bounds
+changes, and polygon recovery after geometry changes. Conflicting geometry can
+therefore overlap an anchor until it is released. `BoundaryRemove` still deletes
+outside anchored circles and their bridges. `ShiftOrigin` transforms anchored
+coordinates with the rest of the world, preserving their physical positions.
+
 ## Drag and drop
 
 Use three separate calls on the simulation goroutine, with pointer positions in
@@ -227,7 +260,8 @@ world.Drop()
 ```
 
 `Drag` tests outer disks, preserves the pointer-to-center grab offsets, and
-replaces any existing selection. `MaxCircles <= 0` grabs all hits; a positive
+replaces any existing selection. Anchored circles are excluded from hit testing.
+`MaxCircles <= 0` grabs all hits; a positive
 value limits the selection. Ties use stable IDs, so grid sorting does not affect
 selection. Optional `Groups` filters the hits; empty means all groups. A miss
 leaves nothing selected. Nonfinite pointer coordinates are ignored.

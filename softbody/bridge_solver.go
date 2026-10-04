@@ -34,7 +34,7 @@ func (s *State) solveBridgeConstraints(dt float32) {
 				target := min(max(d, float64(b.MinDistance)), float64(b.MaxDistance))
 				w := float64(s.p.invMass[i]) + float64(s.p.invMass[j])
 				if w == 0 {
-					continue // Both endpoints are held; the pointer takes precedence.
+					continue // Fixed endpoints take precedence over bridge limits.
 				}
 				correction := (d - target) / w
 				dxi := float32(nx * correction * float64(s.p.invMass[i]))
@@ -74,6 +74,9 @@ func (s *State) solveBridgeConstraints(dt float32) {
 
 func (s *State) confineBridgeParticles() {
 	for i, radius := range s.p.inner {
+		if s.isAnchored(i) {
+			continue
+		}
 		if s.cfg.BoundaryMode == BoundaryWalls {
 			s.p.x[i], s.p.vx[i] = confine(s.p.x[i], s.p.vx[i], s.bounds.MinX+radius, s.bounds.MaxX-radius, s.cfg.Restitution)
 			s.p.y[i], s.p.vy[i] = confine(s.p.y[i], s.p.vy[i], s.bounds.MinY+radius, s.bounds.MaxY-radius, s.cfg.Restitution)

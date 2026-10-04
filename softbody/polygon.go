@@ -26,8 +26,8 @@ type polygon struct {
 // Points are copied and may describe a convex or concave simple polygon in
 // either winding order. A repeated closing point is optional. Holes, crossing
 // edges, duplicate vertices, and zero-area polygons are rejected. Outer shells
-// compress against the boundary; inner cores cannot cross it. Existing circles
-// inside an obstacle are projected toward its nearest boundary.
+// compress against the boundary; inner cores cannot cross it. Existing unanchored
+// circles inside an obstacle are projected toward its nearest boundary.
 // In BoundaryRemove, its bounding box must intersect the world, and circles
 // pushed outside during recovery are removed with their incident bridges.
 // Like Step, call this on the simulation goroutine. Leave enough free space
@@ -198,6 +198,9 @@ func (s *State) polygonBounce(i int, nx, ny float64) {
 
 // Recover initial penetrations, including circles created inside a solid.
 func (s *State) projectPolygonCore(i int) {
+	if s.isAnchored(i) {
+		return
+	}
 	r := float64(s.p.inner[i])
 	for pass := 0; pass < 32; pass++ {
 		moved := false
@@ -281,6 +284,9 @@ func (p *polygon) sweep(x, y, dx, dy, r float64) (hit, nx, ny float64) {
 // movePolygonCore sweeps from the current position and slides along contacts.
 // After a bounded number of contacts any remaining movement is discarded.
 func (s *State) movePolygonCore(i int, tx, ty float32) {
+	if s.isAnchored(i) {
+		return
+	}
 	if len(s.polygons) == 0 {
 		s.p.x[i], s.p.y[i] = tx, ty
 		return

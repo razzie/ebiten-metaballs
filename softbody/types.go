@@ -48,6 +48,8 @@ type CircleSnapshot struct {
 	VX, VY      float32
 	InnerRadius float32
 	OuterRadius float32
+	// Anchored means the circle is fixed until ReleaseCircle is called.
+	Anchored bool
 }
 
 // BridgeSpec connects two distinct circles by their stable IDs. Distances are
@@ -196,6 +198,9 @@ type State struct {
 	p       particleData
 	scratch particleData
 	nextID  uint64
+
+	// Anchored circles have zero inverse mass; keep their original values here.
+	anchored map[uint64]float32
 
 	dragged      []draggedCircle
 	dragX, dragY float32

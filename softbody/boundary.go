@@ -65,6 +65,7 @@ func (s *State) removeOutsideCircles() {
 	var maxOuter float32
 	for i := range s.p.x {
 		if !s.bounds.contains(s.p.x[i], s.p.y[i]) {
+			delete(s.anchored, s.p.id[i])
 			continue
 		}
 		maxOuter = max(maxOuter, s.p.outer[i])

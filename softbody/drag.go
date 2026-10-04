@@ -16,6 +16,7 @@ type draggedCircle struct {
 // Selection is tested only here, never during Carry or Step. Grab offsets are
 // preserved so circles do not snap to the pointer. Nonfinite coordinates are
 // ignored (including leaving an existing selection intact).
+// Anchored circles are excluded from hit testing.
 // Like Carry and Drop, call Drag on the simulation goroutine.
 func (s *State) Drag(spec DragSpec) []uint64 {
 	if !finitePointer(spec.X, spec.Y) {
@@ -24,6 +25,9 @@ func (s *State) Drag(spec DragSpec) []uint64 {
 	s.Drop()
 	s.dragX, s.dragY = spec.X, spec.Y
 	for i, id := range s.p.id {
+		if s.isAnchored(i) {
+			continue
+		}
 		if len(spec.Groups) > 0 && !slices.Contains(spec.Groups, s.p.group[i]) {
 			continue
 		}

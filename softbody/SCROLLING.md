@@ -48,6 +48,9 @@ fall back to walls; the setter rejects unknown modes atomically.
 | Polygon is wholly outside | Retain it | Remove it |
 | Polygon partially overlaps | Retain it | Retain it without clipping |
 
+Anchored circles keep their positions when walls change. Removal mode still
+deletes outside anchors and their bridges. See [anchoring](README.md#anchoring).
+
 Circle removal uses centers strictly outside the closed rectangle. Exact-edge
 centers survive, even if a core or shell extends beyond the edge. This keeps
 surviving centers within grid coverage. Polygon removal uses conservative AABB
@@ -78,8 +81,8 @@ confinement and leaves state unchanged on error.
 
 | Method | Displacement | Other behavior |
 | --- | --- | --- |
-| `TranslateCircles(dx, dy)` | Add to every circle and active drag target | Bounds, polygons, and queued impulses stay fixed |
-| `TranslatePolygons(dx, dy)` | Add to every polygon vertex and refresh boxes | Recover circle penetrations immediately |
+| `TranslateCircles(dx, dy)` | Add to unanchored circles and active drag target | Bounds, polygons, and queued impulses stay fixed |
+| `TranslatePolygons(dx, dy)` | Add to every polygon vertex and refresh boxes | Recover unanchored circle penetrations immediately |
 | `ShiftOrigin(dx, dy)` | Subtract from every world-coordinate quantity | Preserve IDs, velocities, masses, radii, and bridge limits |
 
 Circle translation includes held circles and preserves velocities. Polygon-core
@@ -88,7 +91,7 @@ mode, centers translated outside are removed with their bridges. This is a
 teleport, not a sweep against terrain between the initial and final positions.
 
 Polygon translation preserves IDs and revalidates geometry after float32
-rounding. It immediately projects existing penetrations, as `AddPolygon` does;
+rounding. It immediately projects unanchored penetrations, as `AddPolygon` does;
 that can move circles or bounce their velocities. Removal mode discards wholly
 outside polygon boxes before recovery and removes circles pushed outside.
 Bounds, drag targets, and queued impulse sources remain fixed. The operation

@@ -58,7 +58,7 @@ func (s *State) Len() int { return s.p.len() }
 func (s *State) Bounds() Bounds { return s.bounds }
 
 // SetBounds changes the world rectangle without translating entities. Wall mode
-// immediately confines existing cores; remove mode immediately removes outside
+// immediately confines unanchored cores; remove mode immediately removes outside
 // circles, their bridges and drag selections, and wholly outside polygon boxes.
 // Like Step, it must be called from the simulation goroutine.
 func (s *State) SetBounds(b Bounds) error {
@@ -187,7 +187,8 @@ func (s *State) Snapshot(dst []CircleSnapshot) []CircleSnapshot {
 	for i := range n {
 		dst[i] = CircleSnapshot{
 			ID: s.p.id[i], Group: s.p.group[i],
-			X: s.p.x[i], Y: s.p.y[i], VX: s.p.vx[i], VY: s.p.vy[i],
+			Anchored: s.isAnchored(i),
+			X:        s.p.x[i], Y: s.p.y[i], VX: s.p.vx[i], VY: s.p.vy[i],
 			InnerRadius: s.p.inner[i], OuterRadius: s.p.outer[i],
 		}
 	}
