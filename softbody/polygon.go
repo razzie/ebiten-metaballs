@@ -28,25 +28,48 @@ type polygon struct {
 // edges, duplicate vertices, and zero-area polygons are rejected. Outer shells
 // compress against the boundary; inner cores cannot cross it. Existing circles
 // inside an obstacle are projected toward its nearest boundary.
+// In BoundaryRemove, its bounding box must intersect the world, and circles
+// pushed outside during recovery are removed with their incident bridges.
 // Like Step, call this on the simulation goroutine. Leave enough free space
 // between obstacles and world bounds for the circles' cores to fit.
 func (s *State) AddPolygon(points []Point) (uint64, error) {
+	p, err := preparePolygon(points)
+	if err != nil {
+		return 0, err
+	}
+	if s.cfg.BoundaryMode == BoundaryRemove && !s.bounds.intersects(p.bounds) {
+		return 0, fmt.Errorf("polygon bounding box must intersect the world bounds")
+	}
+	s.nextPolygonID++
+	p.ID = s.nextPolygonID
+	s.polygons = append(s.polygons, p)
+	s.geometryDirty = true
+	for i := range s.p.x {
+		s.projectPolygonCore(i)
+	}
+	s.removeOutsideCircles()
+	return p.ID, nil
+}
+
+// Shared by additions and translations so float32 rounding cannot introduce
+// invalid obstacle geometry during an otherwise valid coordinate change.
+func preparePolygon(points []Point) (polygon, error) {
 	if len(points) > 1 && points[0] == points[len(points)-1] {
 		points = points[:len(points)-1]
 	}
 	if len(points) < 3 {
-		return 0, fmt.Errorf("polygon needs at least three vertices")
+		return polygon{}, fmt.Errorf("polygon needs at least three vertices")
 	}
 	p := polygon{PolygonSnapshot: PolygonSnapshot{Points: slices.Clone(points)}}
 	p.bounds = Bounds{points[0].X, points[0].Y, points[0].X, points[0].Y}
 	area := float64(0)
 	for i, a := range points {
 		if !finitePointer(a.X, a.Y) {
-			return 0, fmt.Errorf("polygon coordinates must be finite")
+			return polygon{}, fmt.Errorf("polygon coordinates must be finite")
 		}
 		b := points[(i+1)%len(points)]
 		if a == b {
-			return 0, fmt.Errorf("polygon edges must have positive length")
+			return polygon{}, fmt.Errorf("polygon edges must have positive length")
 		}
 		// Translate to the first vertex to avoid cancellation at large offsets.
 		area += (float64(a.X)-float64(points[0].X))*(float64(b.Y)-float64(points[0].Y)) - (float64(b.X)-float64(points[0].X))*(float64(a.Y)-float64(points[0].Y))
@@ -56,32 +79,25 @@ func (s *State) AddPolygon(points []Point) (uint64, error) {
 		p.bounds.MaxY = max(p.bounds.MaxY, a.Y)
 		c := points[(i+2)%len(points)]
 		if orient(a, b, c) == 0 && (float64(a.X)-float64(b.X))*(float64(c.X)-float64(b.X))+(float64(a.Y)-float64(b.Y))*(float64(c.Y)-float64(b.Y)) > 0 {
-			return 0, fmt.Errorf("polygon edges overlap")
+			return polygon{}, fmt.Errorf("polygon edges overlap")
 		}
 		for j := i + 1; j < len(points); j++ {
 			if j == i+1 || i == 0 && j == len(points)-1 {
 				continue
 			}
 			if segmentsIntersect(a, b, points[j], points[(j+1)%len(points)]) {
-				return 0, fmt.Errorf("polygon must not self-intersect")
+				return polygon{}, fmt.Errorf("polygon must not self-intersect")
 			}
 		}
 	}
 	if area == 0 {
-		return 0, fmt.Errorf("polygon must have positive area")
+		return polygon{}, fmt.Errorf("polygon must have positive area")
 	}
 	p.winding = 1
 	if area < 0 {
 		p.winding = -1
 	}
-	s.nextPolygonID++
-	p.ID = s.nextPolygonID
-	s.polygons = append(s.polygons, p)
-	s.geometryDirty = true
-	for i := range s.p.x {
-		s.projectPolygonCore(i)
-	}
-	return p.ID, nil
+	return p, nil
 }
 
 // RemovePolygon removes an obstacle by ID. Call on the simulation goroutine.
@@ -197,7 +213,7 @@ func (s *State) projectPolygonCore(i int) {
 			}
 			padding := polygonPadding(x, y, r)
 			tx, ty := x+nx*(r-d+padding), y+ny*(r-d+padding)
-			if !s.coreWithinBounds(tx, ty, r) {
+			if s.cfg.BoundaryMode == BoundaryWalls && !s.coreWithinBounds(tx, ty, r) {
 				// A polygon may extend beyond the world. Choose an exit into
 				// free space instead of repeatedly pushing through a world wall.
 				if fx, fy, ok := s.freePolygonPosition(x, y, r); ok {
@@ -277,16 +293,18 @@ func (s *State) movePolygonCore(i int, tx, ty float32) {
 		hit, nx, ny := float64(1), float64(0), float64(0)
 		// Sliding on a sloped polygon can reach a world wall even when the
 		// original target was in bounds. Sweep the world walls as well.
-		for _, wall := range [][4]float64{
-			{x - float64(s.bounds.MinX) - r, dx, 1, 0},
-			{float64(s.bounds.MaxX) - r - x, -dx, -1, 0},
-			{y - float64(s.bounds.MinY) - r, dy, 0, 1},
-			{float64(s.bounds.MaxY) - r - y, -dy, 0, -1},
-		} {
-			if wall[1] < 0 {
-				t := -wall[0] / wall[1]
-				if t >= 0 && t < hit {
-					hit, nx, ny = t, wall[2], wall[3]
+		if s.cfg.BoundaryMode == BoundaryWalls {
+			for _, wall := range [][4]float64{
+				{x - float64(s.bounds.MinX) - r, dx, 1, 0},
+				{float64(s.bounds.MaxX) - r - x, -dx, -1, 0},
+				{y - float64(s.bounds.MinY) - r, dy, 0, 1},
+				{float64(s.bounds.MaxY) - r - y, -dy, 0, -1},
+			} {
+				if wall[1] < 0 {
+					t := -wall[0] / wall[1]
+					if t >= 0 && t < hit {
+						hit, nx, ny = t, wall[2], wall[3]
+					}
 				}
 			}
 		}

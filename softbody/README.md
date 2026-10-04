@@ -2,8 +2,12 @@
 
 A rendering-independent 2D circle physics state with rectangular world bounds,
 defaulting to `[0,1] x [0,1]`. Call `SetBounds` on the simulation goroutine to
-resize the world. It immediately confines existing hard cores, updates the walls,
-and rebuilds the hex grid on the next step. Bounds must fit the largest circle.
+extend, shrink, or move the world rectangle; `Bounds()` returns it. The default
+`BoundaryWalls` mode immediately confines existing hard cores and requires the
+largest circle to fit. `BoundaryRemove` instead deletes circles whose centers
+leave the rectangle, including their incident bridges and drag selections.
+The hex grid rebuilds on the next step. All bounds must be finite and have
+finite positive dimensions.
 
 Each circle has:
 
@@ -31,6 +35,72 @@ Optional same-group attraction uses `Config.AttractionRange` as the maximum gap
 between outer shells and `Config.AttractionStrength` as the force at contact.
 The force fades quadratically to zero across that gap; shell and core collision
 responses still prevent collapse. Both values must be positive to enable it.
+
+## Scrolling, translation, and boundaries
+
+```go
+cfg := softbody.DefaultConfig()
+cfg.BoundaryMode = softbody.BoundaryRemove
+world := softbody.New(cfg)
+
+// Move a bounded simulation window without moving surviving entities.
+if err := world.SetBounds(softbody.Bounds{
+    MinX: -1, MinY: -1, MaxX: 2, MaxY: 1,
+}); err != nil {
+    panic(err)
+}
+
+// When coordinates grow, subtract this origin from the whole simulation.
+if err := world.ShiftOrigin(0.5, 0); err != nil {
+    panic(err)
+}
+```
+
+`BoundaryRemove` applies no forces, clamps, or bounces at world edges. A center
+exactly on an edge survives; its core and shell may extend beyond that edge.
+Removal occurs after drag movement, integration, and complete bridge/contact
+solver sweeps, before further grid or endpoint queries. It is discrete, rather
+than continuous detection of every path crossing. `SetBounds` and
+`SetBoundaryMode` apply their policy immediately. Unknown modes passed to `New`
+select walls; `SetBoundaryMode` rejects them without mutation.
+
+Polygons are removed when their bounding boxes are wholly outside after a bounds
+change, a switch to removal, or polygon translation. Touching and partially
+overlapping boxes remain; vertices are never clipped. Outside circle additions
+and wholly outside polygon-box additions are rejected in removal mode. Circle
+addition also rejects obstacle recovery that puts its center outside. Removed
+IDs are never reused, and removed bridge endpoints cannot be connected again.
+Even a bridge with `BreakDistance: 0` is deleted when an endpoint is removed.
+
+`TranslateCircles(dx, dy)` adds the displacement to all circles, including held
+circles and their pending drag target, preserving velocities and IDs. It leaves
+bounds, polygons, and queued impulses fixed. It rejects polygon-core overlaps
+and cores outside walls atomically; in removal mode, outside centers are
+deleted instead. Movement is a teleport and does not sweep intervening terrain.
+
+`TranslatePolygons(dx, dy)` adds the displacement to all obstacle vertices and
+updates collision caches. It immediately recovers circle penetrations, which
+can move circles and reflect velocities. Removal mode also deletes outside
+polygon boxes and circles pushed outside. This repositions static geometry;
+it does not provide moving-platform velocity or sweep the polygons' movement.
+
+`ShiftOrigin(dx, dy)` subtracts the displacement from circles, polygon vertices
+and their boxes, bounds, the active drag target, and queued impulse sources
+together. It preserves IDs, velocities, masses, radii, and bridge limits and
+does not confine or delete entities. Nonfinite results and polygon geometry or
+bounds collapsed by float32 rounding are rejected without mutation. Rounding
+and grid ordering can cause small differences in subsequent trajectories.
+
+All three methods run on the simulation goroutine. `ShiftOrigin` protects the
+impulse queue with its mutex, but the application must synchronize input
+producers with the frame change so new pointer positions and impulse sources
+use the new origin. Track any accumulated global origin in the application.
+
+The rendering camera is independent: use `UVTransform.SetOffset` and convert
+pointer positions with the same transform. Keep a margin between the viewport
+and removal rectangle. Changing bounds does not generate new terrain or restore
+deleted bodies; add content in newly exposed space before stepping. For details
+and grid scaling considerations, see [scrolling worlds](SCROLLING.md).
 
 ## Bridges
 
@@ -125,6 +195,7 @@ Zero makes a bridge unbreakable. All limits, forces, and damping coefficients
 must be finite and nonnegative, `MinDistance <= MaxDistance`, and a
 nonzero `BreakDistance` must be at least `MaxDistance`. Endpoints must be distinct
 existing circles; their groups and separation do not restrict bridge creation.
+Boundary removal always deletes incident bridges, regardless of break distance.
 
 `State.BridgeSnapshot(dst)` copies active bridges and their stable bridge IDs,
 omitting broken or manually removed bridges. Bridge IDs are separate from circle
@@ -163,9 +234,11 @@ leaves nothing selected. Nonfinite pointer coordinates are ignored.
 
 `Carry` never hit-tests again. The selected IDs survive grid reordering, and
 new circles under the pointer are not added. Motion to the latest target is
-spread over the next positive step's substeps. Each core is clamped to the world
-bounds, including after a resize; individual clamping can change the spacing of
-a multiple-circle selection at a wall. `Carry` and `Drop` are harmless without a
+spread over the next positive step's substeps. Wall mode clamps each core to the
+world bounds, including after a resize; individual clamping can change the
+spacing of a multiple-circle selection at a wall. Removal mode allows exits and
+cleans up deleted circles without dropping surviving held circles. `Carry` and
+`Drop` are harmless without a
 selection. `Drop` restores original masses and clears velocity (no throwing),
 including when called before the next step.
 

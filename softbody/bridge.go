@@ -9,8 +9,11 @@ import (
 // AddBridge adds a bridge and returns its stable ID. Multiple bridges may connect
 // the same pair; spring forces add, while constraints are solved together.
 // Like Step, call it on the simulation goroutine.
+// Deleted endpoint IDs are rejected, even if they were previously valid.
 func (s *State) AddBridge(b BridgeSpec) (uint64, error) {
-	if b.A == b.B || b.A == 0 || b.B == 0 || b.A >= s.nextID || b.B >= s.nextID {
+	_, hasA := s.bridgeIndex[b.A]
+	_, hasB := s.bridgeIndex[b.B]
+	if b.A == b.B || !hasA || !hasB {
 		return 0, fmt.Errorf("bridge endpoints must be distinct existing circle IDs")
 	}
 	for _, v := range [...]float32{b.MinDistance, b.MaxDistance, b.BreakDistance, b.AttractForce, b.RepelForce, b.Damping} {
@@ -52,7 +55,6 @@ func (s *State) solveBridges() {
 	if len(s.bridges) == 0 {
 		return
 	}
-	s.indexBridges()
 	s.pruneBrokenBridges()
 
 	for _, b := range s.bridges {
@@ -80,9 +82,11 @@ func (s *State) solveBridges() {
 }
 
 func (s *State) indexBridges() {
-	// Circle IDs are dense and never removed. Refresh after each grid sort so
-	// bridges remain attached to the same circles as storage order changes.
-	s.bridgeIndex = resize(s.bridgeIndex, s.p.len()+1)
+	// IDs can be sparse after removal. Refresh after sorting or compaction.
+	if s.bridgeIndex == nil {
+		s.bridgeIndex = make(map[uint64]int, s.p.len())
+	}
+	clear(s.bridgeIndex)
 	for i, id := range s.p.id {
 		s.bridgeIndex[id] = i
 	}

@@ -12,7 +12,7 @@ func (s *State) solveBridgeConstraints(dt float32) {
 	if !constrain && !damp {
 		return
 	}
-	// solveBridges indexed the current particle order before integration.
+	// The ID lookup includes any removals after integration.
 	// Check the predicted separation before a constraint can pull it back.
 	s.pruneBrokenBridges()
 	if len(s.bridges) == 0 {
@@ -54,10 +54,17 @@ func (s *State) solveBridgeConstraints(dt float32) {
 			// Rebuild the broad phase after moving them, then resolve cores.
 			// Shell forces are still evaluated only once per substep.
 			s.confineBridgeParticles()
+			s.removeOutsideCircles()
+			if s.p.len() == 0 {
+				return
+			}
 			s.rebuildGrid()
-			s.indexBridges()
 			s.projectBridgeContacts()
 			s.confineBridgeParticles()
+			s.removeOutsideCircles()
+			if len(s.bridges) == 0 {
+				return
+			}
 		}
 	}
 	if damp {
@@ -67,8 +74,10 @@ func (s *State) solveBridgeConstraints(dt float32) {
 
 func (s *State) confineBridgeParticles() {
 	for i, radius := range s.p.inner {
-		s.p.x[i], s.p.vx[i] = confine(s.p.x[i], s.p.vx[i], s.bounds.MinX+radius, s.bounds.MaxX-radius, s.cfg.Restitution)
-		s.p.y[i], s.p.vy[i] = confine(s.p.y[i], s.p.vy[i], s.bounds.MinY+radius, s.bounds.MaxY-radius, s.cfg.Restitution)
+		if s.cfg.BoundaryMode == BoundaryWalls {
+			s.p.x[i], s.p.vx[i] = confine(s.p.x[i], s.p.vx[i], s.bounds.MinX+radius, s.bounds.MaxX-radius, s.cfg.Restitution)
+			s.p.y[i], s.p.vy[i] = confine(s.p.y[i], s.p.vy[i], s.bounds.MinY+radius, s.bounds.MaxY-radius, s.cfg.Restitution)
+		}
 		s.projectPolygonCore(i)
 	}
 }

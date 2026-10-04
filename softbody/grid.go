@@ -168,6 +168,7 @@ func (s *State) rebuildGrid() {
 		copyParticle(&s.scratch, dst, &s.p, src)
 	}
 	s.p, s.scratch = s.scratch, s.p
+	s.indexBridges()
 }
 
 func copyParticle(dst *particleData, di int, src *particleData, si int) {

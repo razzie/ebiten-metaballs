@@ -113,6 +113,9 @@ func (s *State) solveCell(cid int, impulses []RadialImpulse) {
 }
 
 func (s *State) wallResponse(i int) (ax, ay, dvx, dvy, cx, cy float32) {
+	if s.cfg.BoundaryMode != BoundaryWalls {
+		return
+	}
 	x, y := s.p.x[i], s.p.y[i]
 	vx, vy := s.p.vx[i], s.p.vy[i]
 	inner, outer := s.p.inner[i], s.p.outer[i]
@@ -182,7 +185,7 @@ func (s *State) integrate(dt float32) {
 		s.polygonStartX = append(s.polygonStartX[:0], s.p.x...)
 		s.polygonStartY = append(s.polygonStartY[:0], s.p.y...)
 	}
-	integrateKernel(&s.p, s.ax, s.ay, s.dvx, s.dvy, s.corrX, s.corrY, dt, dampingStep, massDampingStep, s.cfg.Restitution, s.bounds, s.cfg.Workers)
+	integrateKernel(&s.p, s.ax, s.ay, s.dvx, s.dvy, s.corrX, s.corrY, dt, dampingStep, massDampingStep, s.cfg.Restitution, s.bounds, s.cfg.Workers, s.cfg.BoundaryMode == BoundaryWalls)
 	if len(s.polygons) > 0 {
 		parallelFor(s.p.len(), s.cfg.Workers, 512, func(start, end int) {
 			for i := start; i < end; i++ {

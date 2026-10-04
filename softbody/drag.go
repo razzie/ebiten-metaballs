@@ -44,7 +44,6 @@ func (s *State) Drag(spec DragSpec) []uint64 {
 	if len(s.dragged) == 0 {
 		return nil
 	}
-	s.indexBridges()
 	ids := make([]uint64, len(s.dragged))
 	for k, c := range s.dragged {
 		i := s.bridgeIndex[c.id]
@@ -58,7 +57,8 @@ func (s *State) Drag(spec DragSpec) []uint64 {
 
 // Carry registers the latest pointer position in world coordinates. The next
 // positive Step moves the selection there over its substeps, preserving grab
-// offsets and clamping each core to the world bounds and polygon obstacles.
+// offsets and respecting polygon obstacles. Wall mode clamps each core to the
+// world; remove mode allows exits and removes circles at solver checkpoints.
 // Held circles push other circles and pull bridge neighbors but cannot be moved
 // by physics themselves.
 // It is harmless without a selection; nonfinite coordinates are ignored.
@@ -75,7 +75,6 @@ func (s *State) Drop() {
 	if len(s.dragged) == 0 {
 		return
 	}
-	s.indexBridges()
 	for _, c := range s.dragged {
 		i := s.bridgeIndex[c.id]
 		x, y := s.dragTarget(c, i)
@@ -84,6 +83,7 @@ func (s *State) Drop() {
 		s.p.invMass[i] = c.invMass
 	}
 	s.dragged = s.dragged[:0]
+	s.removeOutsideCircles()
 }
 
 func finitePointer(x, y float32) bool {
@@ -91,6 +91,9 @@ func finitePointer(x, y float32) bool {
 }
 
 func (s *State) dragTarget(c draggedCircle, i int) (float32, float32) {
+	if s.cfg.BoundaryMode == BoundaryRemove {
+		return float32(float64(s.dragX) + c.offsetX), float32(float64(s.dragY) + c.offsetY)
+	}
 	r := s.p.inner[i]
 	return float32(min(max(float64(s.dragX)+c.offsetX, float64(s.bounds.MinX+r)), float64(s.bounds.MaxX-r))),
 		float32(min(max(float64(s.dragY)+c.offsetY, float64(s.bounds.MinY+r)), float64(s.bounds.MaxY-r)))
@@ -100,9 +103,7 @@ func (s *State) carrySubstep(dt float32, remaining int) {
 	if len(s.dragged) == 0 {
 		return
 	}
-	// The grid may have reordered circles during the previous substep or
-	// constraint pass. Resolve stable IDs again before touching the selection.
-	s.indexBridges()
+	// Sorting and removal refresh the lookup, so the selection follows stable IDs.
 	for _, c := range s.dragged {
 		i := s.bridgeIndex[c.id]
 		x, y := s.dragTarget(c, i)

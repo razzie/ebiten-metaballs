@@ -97,7 +97,23 @@ type Bounds struct {
 	MinX, MinY, MaxX, MaxY float32
 }
 
+// BoundaryMode determines what happens at the world rectangle.
+type BoundaryMode uint8
+
+const (
+	// BoundaryWalls confines hard cores and applies shell forces at the edges.
+	BoundaryWalls BoundaryMode = iota
+	// BoundaryRemove removes circles whose centers leave the closed rectangle,
+	// along with their bridges and drag selections. Polygons with bounding boxes
+	// disjoint from the rectangle are removed when bounds or geometry change.
+	BoundaryRemove
+)
+
 type Config struct {
+	// BoundaryMode defaults to BoundaryWalls. Unknown values passed to New
+	// select BoundaryWalls. Use SetBoundaryMode to change it during simulation.
+	BoundaryMode BoundaryMode
+
 	// GridSpacing is the distance between neighboring hex-cell centers.
 	// Zero chooses 2*max(OuterRadius), which is a good starting point.
 	GridSpacing float32
@@ -186,7 +202,7 @@ type State struct {
 
 	bridges              []BridgeSnapshot
 	nextBridgeID         uint64
-	bridgeIndex          []int
+	bridgeIndex          map[uint64]int
 	bridgeDampingImpulse []float64
 
 	polygons                     []polygon

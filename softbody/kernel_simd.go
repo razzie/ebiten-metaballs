@@ -158,7 +158,7 @@ func pairSpanKernel(p *particleData, i, start, end int, cfg Config) (ax, ay, dvx
 	return
 }
 
-func integrateKernel(p *particleData, ax, ay, dvx, dvy, corrX, corrY []float32, dt, dampingStep, massDampingStep, restitution float32, bounds Bounds, workers int) {
+func integrateKernel(p *particleData, ax, ay, dvx, dvy, corrX, corrY []float32, dt, dampingStep, massDampingStep, restitution float32, bounds Bounds, workers int, walls bool) {
 	damping := 1 / (1 + dampingStep)
 	parallelFor(p.len(), workers, 512, func(start, end int) {
 		var probe simd.Float32s
@@ -190,22 +190,24 @@ func integrateKernel(p *particleData, ax, ay, dvx, dvy, corrX, corrY []float32, 
 
 			x := simd.LoadFloat32s(p.x[i : i+lanes]).Add(simd.LoadFloat32s(corrX[i : i+lanes])).Add(vx.Mul(vdt))
 			y := simd.LoadFloat32s(p.y[i : i+lanes]).Add(simd.LoadFloat32s(corrY[i : i+lanes])).Add(vy.Mul(vdt))
-			radius := simd.LoadFloat32s(p.inner[i : i+lanes])
-			xMin, xMax := minX.Add(radius), maxX.Sub(radius)
-			yMin, yMax := minY.Add(radius), maxY.Sub(radius)
+			if walls {
+				radius := simd.LoadFloat32s(p.inner[i : i+lanes])
+				xMin, xMax := minX.Add(radius), maxX.Sub(radius)
+				yMin, yMax := minY.Add(radius), maxY.Sub(radius)
 
-			xLo := x.Less(xMin)
-			xHi := x.Greater(xMax)
-			yLo := y.Less(yMin)
-			yHi := y.Greater(yMax)
-			x = x.Max(xMin).Min(xMax)
-			y = y.Max(yMin).Min(yMax)
+				xLo := x.Less(xMin)
+				xHi := x.Greater(xMax)
+				yLo := y.Less(yMin)
+				yHi := y.Greater(yMax)
+				x = x.Max(xMin).Min(xMax)
+				y = y.Max(yMin).Min(yMax)
 
-			// Reflect only when the velocity points farther out of bounds.
-			xBounce := xLo.And(vx.Less(zero)).Or(xHi.And(vx.Greater(zero)))
-			yBounce := yLo.And(vy.Less(zero)).Or(yHi.And(vy.Greater(zero)))
-			vx = vx.Neg().Mul(vrest).IfElse(xBounce, vx)
-			vy = vy.Neg().Mul(vrest).IfElse(yBounce, vy)
+				// Reflect only when the velocity points farther out of bounds.
+				xBounce := xLo.And(vx.Less(zero)).Or(xHi.And(vx.Greater(zero)))
+				yBounce := yLo.And(vy.Less(zero)).Or(yHi.And(vy.Greater(zero)))
+				vx = vx.Neg().Mul(vrest).IfElse(xBounce, vx)
+				vy = vy.Neg().Mul(vrest).IfElse(yBounce, vy)
+			}
 
 			// Held lanes keep their prescribed positions and velocities.
 			x = x.IfElse(dynamic, simd.LoadFloat32s(p.x[i:i+lanes]))
@@ -229,9 +231,11 @@ func integrateKernel(p *particleData, ax, ay, dvx, dvy, corrX, corrY []float32, 
 			vy := (p.vy[i] + dvy[i] + ay[i]*dt) * particleDamping
 			x := p.x[i] + corrX[i] + vx*dt
 			y := p.y[i] + corrY[i] + vy*dt
-			radius := p.inner[i]
-			x, vx = confine(x, vx, bounds.MinX+radius, bounds.MaxX-radius, restitution)
-			y, vy = confine(y, vy, bounds.MinY+radius, bounds.MaxY-radius, restitution)
+			if walls {
+				radius := p.inner[i]
+				x, vx = confine(x, vx, bounds.MinX+radius, bounds.MaxX-radius, restitution)
+				y, vy = confine(y, vy, bounds.MinY+radius, bounds.MaxY-radius, restitution)
+			}
 
 			p.x[i], p.y[i], p.vx[i], p.vy[i] = x, y, vx, vy
 		}

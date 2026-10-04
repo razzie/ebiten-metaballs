@@ -71,7 +71,7 @@ func TestIntegrateKernelForcesAndCorrections(t *testing.T) {
 				p.x[i], p.y[i], p.vx[i], p.vy[i], p.inner[i] = .5, .5, .2, -.4, .1
 				ax[i], ay[i], dvx[i], dvy[i], cx[i], cy[i] = .4, -.8, .1, .2, .02, -.01
 			}
-			integrateKernel(&p, ax, ay, dvx, dvy, cx, cy, .25, 1, 0, .5, Bounds{MaxX: 1, MaxY: 1}, workers)
+			integrateKernel(&p, ax, ay, dvx, dvy, cx, cy, .25, 1, 0, .5, Bounds{MaxX: 1, MaxY: 1}, workers, true)
 			// v = (initial velocity + impulse + acceleration*dt)*damping;
 			// position includes correction and the newly computed velocity.
 			for i := range n {
@@ -103,7 +103,7 @@ func TestIntegrateKernelPreservesKinematicCircles(t *testing.T) {
 					}
 					force[i] = 1
 				}
-				integrateKernel(&p, force, force, force, force, force, force, .1, .2, massDamping, .5, Bounds{MaxX: 1, MaxY: 1}, workers)
+				integrateKernel(&p, force, force, force, force, force, force, .1, .2, massDamping, .5, Bounds{MaxX: 1, MaxY: 1}, workers, true)
 				for i := range n {
 					wantPosition, wantVelocity := float32(.8), float32(2)
 					if i%2 != 0 {

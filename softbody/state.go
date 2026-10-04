@@ -7,6 +7,9 @@ import (
 
 func New(cfg Config) *State {
 	d := DefaultConfig()
+	if cfg.BoundaryMode != BoundaryWalls && cfg.BoundaryMode != BoundaryRemove {
+		cfg.BoundaryMode = BoundaryWalls
+	}
 	if cfg.Workers == 0 {
 		cfg.Workers = d.Workers
 	}
@@ -51,47 +54,75 @@ func (s *State) Config() Config { return s.cfg }
 
 func (s *State) Len() int { return s.p.len() }
 
-// SetBounds resizes the world and immediately confines existing cores to it.
+// Bounds returns the current world rectangle. Call on the simulation goroutine.
+func (s *State) Bounds() Bounds { return s.bounds }
+
+// SetBounds changes the world rectangle without translating entities. Wall mode
+// immediately confines existing cores; remove mode immediately removes outside
+// circles, their bridges and drag selections, and wholly outside polygon boxes.
 // Like Step, it must be called from the simulation goroutine.
 func (s *State) SetBounds(b Bounds) error {
-	for _, v := range [...]float32{b.MinX, b.MinY, b.MaxX, b.MaxY} {
-		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
-			return fmt.Errorf("bounds must be finite")
-		}
-	}
-	if b.MaxX <= b.MinX || b.MaxY <= b.MinY || min(b.MaxX-b.MinX, b.MaxY-b.MinY) < 2*s.maxOuter {
-		return fmt.Errorf("bounds must have positive dimensions and fit the largest circle")
+	if err := validateBounds(b, s.cfg.BoundaryMode, s.maxOuter); err != nil {
+		return err
 	}
 	if b == s.bounds {
 		return nil
 	}
 	s.bounds = b
 	s.geometryDirty = true
-	for i, radius := range s.p.inner {
-		s.p.x[i], s.p.vx[i] = confine(s.p.x[i], s.p.vx[i], b.MinX+radius, b.MaxX-radius, s.cfg.Restitution)
-		s.p.y[i], s.p.vy[i] = confine(s.p.y[i], s.p.vy[i], b.MinY+radius, b.MaxY-radius, s.cfg.Restitution)
-		s.projectPolygonCore(i)
+	if s.cfg.BoundaryMode == BoundaryRemove {
+		s.removeOutsidePolygons()
+		s.removeOutsideCircles()
+	} else {
+		s.confineBridgeParticles()
 	}
 	return nil
 }
 
+// AddCircle adds a circle and returns its stable ID. Wall mode clamps its core;
+// remove mode requires its center within bounds and rejects polygon recovery
+// that pushes it outside. All values must be finite; nonpositive mass selects 1.
+// Call on the simulation goroutine.
 func (s *State) AddCircle(c CircleSpec) (uint64, error) {
+	for _, v := range [...]float32{c.X, c.Y, c.VX, c.VY, c.InnerRadius, c.OuterRadius, c.Mass} {
+		if !finite(v) {
+			return 0, fmt.Errorf("circle values must be finite")
+		}
+	}
 	if c.InnerRadius <= 0 {
 		return 0, fmt.Errorf("inner radius must be > 0")
 	}
 	if c.OuterRadius < c.InnerRadius {
 		return 0, fmt.Errorf("outer radius must be >= inner radius")
 	}
-	if 2*c.OuterRadius > min(s.bounds.MaxX-s.bounds.MinX, s.bounds.MaxY-s.bounds.MinY) {
+	if s.cfg.BoundaryMode == BoundaryWalls && 2*c.OuterRadius > min(s.bounds.MaxX-s.bounds.MinX, s.bounds.MaxY-s.bounds.MinY) {
 		return 0, fmt.Errorf("outer diameter must fit the world bounds")
+	}
+	if s.cfg.BoundaryMode == BoundaryRemove && !s.bounds.contains(c.X, c.Y) {
+		return 0, fmt.Errorf("circle center must be within the world bounds")
 	}
 	if c.Mass <= 0 {
 		c.Mass = 1
 	}
 
 	// Keep the hard core in the world. The outer shell may overlap a wall.
-	c.X = clamp(c.X, s.bounds.MinX+c.InnerRadius, s.bounds.MaxX-c.InnerRadius)
-	c.Y = clamp(c.Y, s.bounds.MinY+c.InnerRadius, s.bounds.MaxY-c.InnerRadius)
+	if s.cfg.BoundaryMode == BoundaryWalls {
+		c.X = clamp(c.X, s.bounds.MinX+c.InnerRadius, s.bounds.MaxX-c.InnerRadius)
+		c.Y = clamp(c.Y, s.bounds.MinY+c.InnerRadius, s.bounds.MaxY-c.InnerRadius)
+	}
+	// Recover polygon overlaps before allocating an ID. Recovery in remove mode
+	// can place the center outside, in which case the addition is rejected.
+	if len(s.polygons) > 0 {
+		candidate := State{cfg: s.cfg, bounds: s.bounds, polygons: s.polygons, p: particleData{
+			x: []float32{c.X}, y: []float32{c.Y}, vx: []float32{c.VX}, vy: []float32{c.VY}, inner: []float32{c.InnerRadius},
+		}}
+		candidate.projectPolygonCore(0)
+		c.X, c.Y = candidate.p.x[0], candidate.p.y[0]
+		c.VX, c.VY = candidate.p.vx[0], candidate.p.vy[0]
+		if s.cfg.BoundaryMode == BoundaryRemove && !s.bounds.contains(c.X, c.Y) {
+			return 0, fmt.Errorf("polygon recovery places circle outside the world bounds")
+		}
+	}
 
 	i := s.p.len()
 	s.p.resize(i + 1)
@@ -104,12 +135,15 @@ func (s *State) AddCircle(c CircleSpec) (uint64, error) {
 	s.p.vx[i], s.p.vy[i] = c.VX, c.VY
 	s.p.inner[i], s.p.outer[i] = c.InnerRadius, c.OuterRadius
 	s.p.invMass[i] = 1 / c.Mass
+	if s.bridgeIndex == nil {
+		s.bridgeIndex = make(map[uint64]int)
+	}
+	s.bridgeIndex[id] = i
 
 	if c.OuterRadius > s.maxOuter {
 		s.maxOuter = c.OuterRadius
 		s.geometryDirty = true
 	}
-	s.projectPolygonCore(i)
 	return id, nil
 }
 
@@ -169,6 +203,10 @@ func (s *State) Step(dt float32) {
 	h := dt / float32(s.cfg.Substeps)
 	for sub := 0; sub < s.cfg.Substeps; sub++ {
 		s.carrySubstep(h, s.cfg.Substeps-sub)
+		s.removeOutsideCircles()
+		if s.p.len() == 0 {
+			return
+		}
 		s.rebuildGrid()
 		s.ensureWorkBuffers()
 
@@ -179,6 +217,10 @@ func (s *State) Step(dt float32) {
 		s.solveCells(subImpulses)
 		s.solveBridges()
 		s.integrate(h)
+		s.removeOutsideCircles()
+		if s.p.len() == 0 {
+			return
+		}
 		s.solveBridgeConstraints(h)
 	}
 }
