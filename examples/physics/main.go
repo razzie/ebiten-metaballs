@@ -2,6 +2,7 @@ package main
 
 import (
 	"cmp"
+	_ "embed"
 	"fmt"
 	"image/color"
 	"log"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
+	"github.com/hajimehoshi/ebiten/v2/inpututil"
 	metaballs "github.com/razzie/ebiten-metaballs"
 	"github.com/razzie/ebiten-metaballs/softbody"
 )
@@ -22,6 +24,8 @@ const (
 	baseRadius      = 0.02
 	cursorRadius    = 0.5
 	cursorImpulse   = 1.5 / ticksPerSecond
+	smoothK         = baseRadius * 3
+	borderThickness = 0.004
 )
 
 const (
@@ -30,13 +34,31 @@ const (
 	blue
 )
 
+const (
+	normalShading = iota
+	borderShading
+	gelShading
+	shadingModeCount
+)
+
+var shadingNames = [shadingModeCount]string{"normal", "border", "gel"}
+
+//go:embed gel.kage
+var gelSource []byte
+
 type Game struct {
-	world    *softbody.State
-	renderer *metaballs.Renderer
-	groups   []metaballs.Group
-	snapshot []softbody.CircleSnapshot
-	xform    metaballs.UVTransform
-	bounds   metaballs.UVBounds
+	world       *softbody.State
+	renderers   [shadingModeCount]*metaballs.Renderer
+	shading     int
+	gel         *ebiten.Shader
+	geometry    *ebiten.Image
+	pigment     *ebiten.Image
+	gelUniforms map[string]any
+	ticks       int
+	groups      []metaballs.Group
+	snapshot    []softbody.CircleSnapshot
+	xform       metaballs.UVTransform
+	bounds      metaballs.UVBounds
 }
 
 func NewGame() (*Game, error) {
@@ -98,41 +120,45 @@ func NewGame() (*Game, error) {
 		}
 	}
 
-	renderer, err := metaballs.NewRenderer(metaballs.RendererConfig{
-		Common: metaballs.ShaderCommonConfig{
-			// Keep contact rounding small relative to the physical circle radius.
-			SmoothK:       baseRadius * 3,
-			LightDirX:     1,
-			LightDirY:     -1,
-			EdgeThickness: 0.008,
-			FxaaEnabled:   true,
-		},
-		Tiers: []metaballs.ShaderCapacity{
-			{Groups: 3, Circles: 48},
-			// Fit the entire world even when clicks bring all colors together.
-			{Groups: 3, Circles: 3 * circlesPerGroup},
-		},
-		RootCols:    2,
-		RootRows:    2,
-		MaxDepth:    3,
-		MinTileSize: 0.01,
-		Workers:     4,
-	})
+	gel, err := ebiten.NewShader(gelSource)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("compile gel shader: %w", err)
 	}
 
 	xform, bounds := metaballs.NewCenteredUVTransform(screenSize, screenSize)
 	g := &Game{
-		world:    world,
-		renderer: renderer,
-		xform:    xform,
-		bounds:   bounds,
+		world:       world,
+		gel:         gel,
+		gelUniforms: map[string]any{"GeometryK": float32(smoothK)},
+		xform:       xform,
+		bounds:      bounds,
 		groups: []metaballs.Group{
 			red:   {Color: metaballs.NewColorScale(1, 0.15, 0.15, 1)},
 			green: {Color: metaballs.NewColorScale(0.15, 1, 0.25, 1)},
 			blue:  {Color: metaballs.NewColorScale(0.15, 0.35, 1, 1)},
 		},
+	}
+	for mode, common := range [shadingModeCount]metaballs.ShaderCommonConfig{
+		normalShading: {SmoothK: smoothK, LightDirX: 1, LightDirY: -1, EdgeThickness: 0.008, FxaaEnabled: true},
+		borderShading: {SmoothK: smoothK, LightDirX: 1, LightDirY: -1, EdgeThickness: 0.008, BorderThickness: borderThickness, FxaaEnabled: true},
+		// Geometry channels are data: antialias only the consuming color pass.
+		gelShading: {SmoothK: smoothK, GeometryBuffer: true},
+	} {
+		renderer, err := metaballs.NewRenderer(metaballs.RendererConfig{
+			Common: common,
+			Tiers: []metaballs.ShaderCapacity{
+				{Groups: 3, Circles: 48},
+				// Fit the entire world even when clicks bring all colors together.
+				{Groups: 3, Circles: 3 * circlesPerGroup},
+			},
+			RootCols: 2, RootRows: 2,
+			MaxDepth: 3, MinTileSize: 0.01,
+			Workers: 4,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("create %s renderer: %w", shadingNames[mode], err)
+		}
+		g.renderers[mode] = renderer
 	}
 	for i := range g.groups {
 		g.groups[i].Circles = make([]metaballs.Circle, 0, circlesPerGroup)
@@ -160,6 +186,9 @@ func (g *Game) syncCircles() {
 }
 
 func (g *Game) Update() error {
+	if inpututil.IsKeyJustPressed(ebiten.KeyTab) {
+		g.shading = (g.shading + 1) % shadingModeCount
+	}
 	mx, my := ebiten.CursorPosition()
 	x, y := g.xform.ScreenToUV(mx, my)
 	if x >= g.bounds.MinX && x < g.bounds.MaxX && y >= g.bounds.MinY && y < g.bounds.MaxY {
@@ -186,18 +215,55 @@ func (g *Game) Update() error {
 	}
 	g.world.Step(1.0 / ticksPerSecond)
 	g.syncCircles()
+	g.ticks++
+	return nil
+}
+
+func (g *Game) drawGel(screen *ebiten.Image) error {
+	w, h := screen.Bounds().Dx(), screen.Bounds().Dy()
+	if g.geometry == nil || g.geometry.Bounds().Dx() != w || g.geometry.Bounds().Dy() != h {
+		if g.geometry != nil {
+			g.geometry.Deallocate()
+			g.pigment.Deallocate()
+		}
+		g.geometry = ebiten.NewImage(w, h)
+		g.pigment = ebiten.NewImage(w, h)
+	}
+	// Discarded pixels retain their previous contents. Clear both passes so
+	// moving droplets cannot leave geometry or colors behind.
+	g.geometry.Clear()
+	g.pigment.Clear()
+	if _, err := g.renderers[gelShading].Draw(g.geometry, g.groups, g.xform); err != nil {
+		return err
+	}
+	// Geometry has no group colors; recover the pigment from the normal pass.
+	if _, err := g.renderers[normalShading].Draw(g.pigment, g.groups, g.xform); err != nil {
+		return err
+	}
+	pixelUV, _ := g.xform.Scale()
+	g.gelUniforms["PixelUV"] = pixelUV
+	g.gelUniforms["Time"] = float32(g.ticks) / ticksPerSecond
+	screen.DrawRectShader(w, h, g.gel, &ebiten.DrawRectShaderOptions{
+		Images: [4]*ebiten.Image{g.geometry, g.pigment}, Uniforms: g.gelUniforms,
+	})
 	return nil
 }
 
 func (g *Game) Draw(screen *ebiten.Image) {
 	screen.Fill(color.RGBA{R: 16, G: 18, B: 24, A: 255})
-	if _, err := g.renderer.Draw(screen, g.groups, g.xform); err != nil {
+	var err error
+	if g.shading == gelShading {
+		err = g.drawGel(screen)
+	} else {
+		_, err = g.renderers[g.shading].Draw(screen, g.groups, g.xform)
+	}
+	if err != nil {
 		ebitenutil.DebugPrint(screen, err.Error())
 		return
 	}
 	ebitenutil.DebugPrint(screen, fmt.Sprintf(
-		"Hold to attract: left = red | middle = green | right = blue\nHold Space to repel all colors near the cursor\n%d circles | FPS: %.1f | TPS: %.1f",
-		g.world.Len(), ebiten.ActualFPS(), ebiten.ActualTPS(),
+		"Hold to attract: left = red | middle = green | right = blue\nHold Space to repel all colors near the cursor\nTab: switch shading | Current: %s\n%d circles | FPS: %.1f | TPS: %.1f",
+		shadingNames[g.shading], g.world.Len(), ebiten.ActualFPS(), ebiten.ActualTPS(),
 	))
 }
 

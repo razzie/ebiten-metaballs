@@ -31,7 +31,7 @@ Move the mouse to control the blue metaballs. Other examples, run from the repos
 | [walls](examples/walls) | Rigid segments, same-group blending, and contacts between groups |
 | [bridges](examples/bridges) | Connected soft bodies, dragging, and borders |
 | [manycircles](examples/manycircles) | Adaptive tiling for a larger scene |
-| [physics](examples/physics) | Circle physics and group-filtered attraction/repulsion |
+| [physics](examples/physics) | Circle physics and group-filtered attraction/repulsion; Tab cycles normal, border, and geometry-buffer gel shading |
 | [polygons](examples/polygons) | Solid physics obstacles with matching rendered wall boundaries |
 | [water](examples/water) | A geometry buffer consumed by a custom water shader |
 

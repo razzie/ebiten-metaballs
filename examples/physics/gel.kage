@@ -1,0 +1,69 @@
+//kage:unit pixels
+
+package main
+
+var GeometryK float
+var PixelUV float
+var Time float
+
+// A faint grid makes refraction visible without needing another texture.
+func backdrop(p vec2) vec3 {
+	uv := (p - imageSrc0Size()*0.5) * PixelUV
+	grid := abs(fract(uv*18.0) - 0.5)
+	line := smoothstep(0.47, 0.5, max(grid.x, grid.y))
+	glow := exp(-dot(uv, uv)*2.5)
+	return vec3(0.045, 0.052, 0.072) + vec3(0.012, 0.016, 0.024)*glow + vec3(0.009)*line
+}
+
+func Fragment(dstPos vec4, srcPos vec2) vec4 {
+	p := dstPos.xy - imageDstOrigin()
+	data := imageSrc0At(srcPos)
+	background := backdrop(p)
+	if data.w == 0.0 {
+		shadow := imageSrc0At(srcPos - vec2(0.004, 0.006)/PixelUV).w
+		return vec4(background*(1.0-min(shadow*1.8, 0.45)), 1.0)
+	}
+
+	// Decode RGBA8 geometry without treating the radius channel as opacity.
+	e := data.xy*2.0 - 1.0
+	gradient := e / max(vec2(1.0)-abs(e), vec2(1.0/255.0))
+	distance := -GeometryK * data.z / max(1.0-data.z, 1.0/255.0)
+	radius := GeometryK * data.w / max(1.0-data.w, 1.0/255.0)
+	gradLen := length(gradient)
+	depth := -distance / max(gradLen, 0.25)
+	direction := gradient / max(gradLen, 0.01)
+
+	// Build a rounded dome from distance and blended radius, flattening where
+	// opposing gradients cancel inside a merged or squeezed cluster.
+	shoulder := clamp(1.0-depth/max(radius, PixelUV), 0.0, 1.0)
+	shoulder *= smoothstep(0.05, 0.5, gradLen)
+	uv := p * PixelUV
+	ripple := vec2(sin(uv.y*85.0+Time*1.2), cos(uv.x*75.0-Time))
+	nxy := direction*shoulder*0.98 + ripple*0.025*(1.0-shoulder)
+	normal := normalize(vec3(nxy, sqrt(max(1.0-dot(nxy, nxy), 0.02))))
+
+	// Normal shading scales all RGB channels equally. Removing that scale
+	// recovers each group's original pigment for this independent lighting pass.
+	sample := imageSrc1At(srcPos).rgb
+	pigment := sample / max(max(sample.r, max(sample.g, sample.b)), 1.0/255.0)
+	thickness := 2.0*radius*normal.z
+	absorption := exp(-thickness/0.02*(vec3(1.0)-pigment)*1.8)
+	refracted := backdrop(p + normal.xy*radius*0.65/PixelUV)
+	gel := (refracted + vec3(0.4))*absorption
+	gel += pigment*(0.12+0.3*normal.z)*(vec3(1.0)-absorption)
+
+	// Fresnel rims and studio light panels give the gel a wet, glossy surface.
+	fresnel := 0.04 + 0.65*pow(1.0-normal.z, 3.0)
+	reflection := mix(vec3(0.10, 0.15, 0.24), vec3(0.65, 0.8, 0.95), 0.5-0.5*normal.y)
+	panel := exp(-pow((normal.x+0.3)*7.0, 2.0)-pow((normal.y+0.45)*15.0, 2.0))
+	reflection += vec3(1.0)*panel*1.5
+	gel = mix(gel, reflection, fresnel)
+	light := normalize(vec3(-0.4, -0.55, 1.4))
+	specular := pow(max(dot(normal, light), 0.0), 85.0)
+	softLight := pow(max(dot(normal, light), 0.0), 12.0)
+	gel += vec3(0.85, 0.93, 1.0)*(specular*0.9+panel*0.35+softLight*0.08)
+
+	// Antialias the final color, leaving all geometry channels unfiltered.
+	coverage := smoothstep(0.0, PixelUV*1.25, depth)
+	return vec4(mix(background, gel, coverage), 1.0)
+}
